@@ -5,7 +5,7 @@
 //   - Building the hidden-form fields + HMAC-SHA512 AuthHash for redirecting to Azul
 //   - Validating the callback hash when Azul redirects back
 //   - Building VOID (cancellation) form fields
-//   - Amount formatting (cents → Azul format)
+//   - Amount formatting (monetary amounts ↔ Azul string format)
 //
 // This package is transport-agnostic — it generates form data but does NOT make
 // HTTP requests. Your application is responsible for rendering the HTML form or
@@ -14,6 +14,7 @@ package azul
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -35,7 +36,8 @@ const (
 // Config holds all Azul Payment Page configuration.
 //
 // Required fields: MerchantID, AuthKey, MerchantName, ApprovedURL, DeclinedURL, CancelURL.
-// Optional: MerchantType defaults to "ECommerce", TerminalID defaults to "00000001".
+// Optional: MerchantType defaults to "ECommerce", TerminalID defaults to "00000001",
+// CurrencyCode defaults to "$" (DOP).
 type Config struct {
 	// MerchantID is the merchant identifier assigned by Azul (e.g. "39038540035").
 	MerchantID string
@@ -51,6 +53,11 @@ type Config struct {
 
 	// TerminalID is assigned by Azul (e.g. "00000001"). Defaults to "00000001".
 	TerminalID string
+
+	// CurrencyCode is the default currency for transactions.
+	// "$" = DOP (Dominican Peso), "USD" = US Dollar.
+	// Defaults to "$". Can be overridden per request.
+	CurrencyCode string
 
 	// Environment selects the Azul endpoint: "test" or "production".
 	Environment string
@@ -75,6 +82,9 @@ func (c *Config) defaults() {
 	}
 	if c.TerminalID == "" {
 		c.TerminalID = "00000001"
+	}
+	if c.CurrencyCode == "" {
+		c.CurrencyCode = "$"
 	}
 }
 
@@ -102,11 +112,15 @@ type PaymentRequest struct {
 	// OrderNumber is the unique reference for this transaction (e.g. "ORD-1234").
 	OrderNumber string
 
-	// Amount is the total amount in cents (e.g. 150000 = RD$1,500.00).
-	Amount int64
+	// Amount is the total amount in the transaction currency (e.g. 1500.00 = RD$1,500.00).
+	Amount float64
 
-	// ITBIS is the tax amount in cents. Set to 0 if ITBIS is already included in Amount.
-	ITBIS int64
+	// ITBIS is the tax amount in the transaction currency. Set to 0 if already included in Amount.
+	ITBIS float64
+
+	// CurrencyCode overrides Config.CurrencyCode for this request.
+	// "$" = DOP, "USD" = US Dollar. Leave empty to use the Config default.
+	CurrencyCode string
 }
 
 // PaymentResult contains everything needed to POST the payment form to Azul.
@@ -131,7 +145,7 @@ type PaymentResult struct {
 //
 //	result := client.BuildPaymentForm(azul.PaymentRequest{
 //	    OrderNumber: "ORD-1234",
-//	    Amount:      150000,  // RD$1,500.00
+//	    Amount:      1500.00,  // RD$1,500.00
 //	    ITBIS:       0,
 //	})
 //	// result.ActionURL  → POST target
@@ -139,12 +153,16 @@ type PaymentResult struct {
 func (c *Client) BuildPaymentForm(req PaymentRequest) PaymentResult {
 	amount := FormatAmount(req.Amount)
 	itbis := FormatAmount(req.ITBIS)
+	currency := req.CurrencyCode
+	if currency == "" {
+		currency = c.config.CurrencyCode
+	}
 
 	fields := map[string]string{
 		"MerchantId":        c.config.MerchantID,
 		"MerchantName":      c.config.MerchantName,
 		"MerchantType":      c.config.MerchantType,
-		"CurrencyCode":      "$",
+		"CurrencyCode":      currency,
 		"OrderNumber":       req.OrderNumber,
 		"Amount":            amount,
 		"ITBIS":             itbis,
@@ -186,11 +204,15 @@ type VoidRequest struct {
 	// AzulOrderID is the Azul-assigned transaction ID from the original payment callback.
 	AzulOrderID string
 
-	// Amount is the original transaction amount in cents.
-	Amount int64
+	// Amount is the original transaction amount in the transaction currency (e.g. 1500.00).
+	Amount float64
 
-	// ITBIS is the original tax amount in cents.
-	ITBIS int64
+	// ITBIS is the original tax amount in the transaction currency.
+	ITBIS float64
+
+	// CurrencyCode overrides Config.CurrencyCode for this request.
+	// "$" = DOP, "USD" = US Dollar. Leave empty to use the Config default.
+	CurrencyCode string
 }
 
 // VoidResult contains everything needed to POST the VOID form to Azul.
@@ -216,12 +238,16 @@ type VoidResult struct {
 //	result := client.BuildVoidForm(azul.VoidRequest{
 //	    OrderNumber: "ORD-1234",
 //	    AzulOrderID: "abc-def-123",
-//	    Amount:      150000,
+//	    Amount:      1500.00,
 //	    ITBIS:       0,
 //	})
 func (c *Client) BuildVoidForm(req VoidRequest) VoidResult {
 	amount := FormatAmount(req.Amount)
 	itbis := FormatAmount(req.ITBIS)
+	currency := req.CurrencyCode
+	if currency == "" {
+		currency = c.config.CurrencyCode
+	}
 
 	voidURL := c.config.VoidCallbackURL
 	if voidURL == "" {
@@ -232,7 +258,7 @@ func (c *Client) BuildVoidForm(req VoidRequest) VoidResult {
 		"MerchantId":        c.config.MerchantID,
 		"MerchantName":      c.config.MerchantName,
 		"MerchantType":      c.config.MerchantType,
-		"CurrencyCode":      "$",
+		"CurrencyCode":      currency,
 		"OrderNumber":       req.OrderNumber,
 		"Amount":            amount,
 		"ITBIS":             itbis,
@@ -337,18 +363,19 @@ func GenerateOrderNumber(prefix string) string {
 // Amount formatting
 // ============================================================================
 
-// FormatAmount converts cents (int64) to Azul's amount string format.
+// FormatAmount converts a monetary amount (e.g. 1500.00) to Azul's string format.
 //
-// Azul expects the amount as a string where the last 2 digits are cents,
+// Azul expects the amount as a string where the last 2 digits represent cents,
 // with no decimal separator. Minimum length is 3 characters (zero-padded).
 //
 // Examples:
 //
-//	FormatAmount(0)      → "000"
-//	FormatAmount(50)     → "050"
-//	FormatAmount(1500)   → "1500"    (= $15.00)
-//	FormatAmount(150000) → "150000"  (= $1,500.00)
-func FormatAmount(cents int64) string {
+//	FormatAmount(0)       → "000"
+//	FormatAmount(0.50)    → "050"
+//	FormatAmount(15.00)   → "1500"
+//	FormatAmount(1500.00) → "150000"
+func FormatAmount(amount float64) string {
+	cents := int64(math.Round(amount * 100))
 	s := fmt.Sprintf("%d", cents)
 	if len(s) < 3 {
 		return fmt.Sprintf("%03d", cents)
@@ -356,19 +383,19 @@ func FormatAmount(cents int64) string {
 	return s
 }
 
-// ParseAmount converts an Azul amount string back to cents.
+// ParseAmount converts an Azul amount string back to a monetary amount.
 //
 // This is the inverse of FormatAmount. Returns 0 if the string is invalid.
 //
 // Examples:
 //
-//	ParseAmount("000")    → 0
-//	ParseAmount("1500")   → 1500
-//	ParseAmount("150000") → 150000
-func ParseAmount(s string) int64 {
+//	ParseAmount("000")    → 0.00
+//	ParseAmount("1500")   → 15.00
+//	ParseAmount("150000") → 1500.00
+func ParseAmount(s string) float64 {
 	var n int64
 	fmt.Sscanf(s, "%d", &n)
-	return n
+	return float64(n) / 100.0
 }
 
 // ============================================================================

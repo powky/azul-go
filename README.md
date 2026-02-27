@@ -7,7 +7,8 @@ Cliente Go para **Azul Payment Page (HPP)** — la pasarela de pago estándar de
 - Genera los campos del formulario HTML + el AuthHash HMAC-SHA512 para redirigir al usuario a Azul
 - Valida el hash de retorno cuando Azul redirige de vuelta a tu app (previene fraude)
 - Genera los campos del formulario para anular (VOID) una transacción
-- Formatea montos de centavos al formato que espera Azul
+- Convierte montos entre formato legible (1500.00) y formato Azul ("150000")
+- Soporta múltiples monedas ("$" para DOP, "USD" para dólares)
 - Genera números de orden únicos
 
 ## Qué NO hace
@@ -42,6 +43,7 @@ func main() {
         MerchantName: "Mi Tienda",
         MerchantType: "ECommerce",  // opcional, default "ECommerce"
         TerminalID:   "00000001",   // opcional, default "00000001"
+        CurrencyCode: "$",          // opcional, default "$" (DOP). Usa "USD" para dólares
         Environment:  "test",       // "test" o "production"
         ApprovedURL:  "https://mitienda.com/pago/aprobado",
         DeclinedURL:  "https://mitienda.com/pago/rechazado",
@@ -51,8 +53,8 @@ func main() {
     // 2. Generar formulario de pago
     result := client.BuildPaymentForm(azul.PaymentRequest{
         OrderNumber: azul.GenerateOrderNumber("ORD"),
-        Amount:      150000, // RD$1,500.00 en centavos
-        ITBIS:       0,      // 0 si ya está incluido en Amount
+        Amount:      1500.00, // RD$1,500.00
+        ITBIS:       0,       // 0 si ya está incluido en Amount
     })
 
     fmt.Println("POST a:", result.ActionURL)
@@ -73,6 +75,7 @@ func main() {
 | `MerchantName` | `string` | ✅ | — | Nombre que aparece en la página de pago de Azul |
 | `MerchantType` | `string` | — | `"ECommerce"` | Tipo de integración |
 | `TerminalID` | `string` | — | `"00000001"` | Terminal asignada por Azul |
+| `CurrencyCode` | `string` | — | `"$"` | Moneda por defecto: `"$"` (DOP) o `"USD"` |
 | `Environment` | `string` | ✅ | — | `"test"` o `"production"` |
 | `ApprovedURL` | `string` | ✅ | — | URL de redirección tras pago exitoso |
 | `DeclinedURL` | `string` | ✅ | — | URL de redirección tras pago rechazado |
@@ -87,6 +90,7 @@ AZUL_AUTH_KEY=tu-clave-secreta
 AZUL_MERCHANT_NAME=Mi Tienda
 AZUL_MERCHANT_TYPE=ECommerce
 AZUL_TERMINAL_ID=00000001
+AZUL_CURRENCY_CODE=$
 AZUL_ENVIRONMENT=test
 AZUL_APPROVED_URL=https://mitienda.com/pago/aprobado
 AZUL_DECLINED_URL=https://mitienda.com/pago/rechazado
@@ -103,13 +107,24 @@ AZUL_VOID_CALLBACK_URL=https://mitienda.com/pago/void
 ```go
 result := client.BuildPaymentForm(azul.PaymentRequest{
     OrderNumber: "ORD-1234",
-    Amount:      250000, // RD$2,500.00
+    Amount:      2500.00, // RD$2,500.00
     ITBIS:       0,
 })
 
 // result.ActionURL    → URL del POST (Azul Payment Page)
 // result.AltActionURL → URL de fallback (solo producción, vacío en test)
 // result.Fields       → map[string]string con TODOS los campos del form
+```
+
+Para cobrar en dólares, pasa `CurrencyCode` en el request:
+
+```go
+result := client.BuildPaymentForm(azul.PaymentRequest{
+    OrderNumber:  "ORD-1234",
+    Amount:       50.00, // USD$50.00
+    ITBIS:        0,
+    CurrencyCode: "USD", // override del default "$" (DOP)
+})
 ```
 
 Tu frontend debe crear un formulario HTML con action=`result.ActionURL` y un `<input type="hidden">` por cada entrada en `result.Fields`:
@@ -132,6 +147,7 @@ O si tu frontend es una SPA (React, Vue, etc.), tu API devuelve el JSON y el fro
   "fields": {
     "MerchantId": "39038540035",
     "Amount": "250000",
+    "CurrencyCode": "$",
     "AuthHash": "a1b2c3...",
     "...": "..."
   }
@@ -170,6 +186,9 @@ if !client.ValidateCallback(params) {
     return
 }
 
+// Convertir el monto de vuelta a número legible
+amount := azul.ParseAmount(params.Amount) // "250000" → 2500.00
+
 // Verificar si el pago fue aprobado
 if client.IsApproved(params) {
     // PAGO EXITOSO
@@ -177,6 +196,7 @@ if client.IsApproved(params) {
     // - Descontar stock
     // - Enviar email de confirmación
     fmt.Println("Pago aprobado! AuthCode:", params.AuthorizationCode)
+    fmt.Printf("Monto cobrado: $%.2f\n", amount)
 } else {
     // PAGO RECHAZADO
     fmt.Println("Rechazado. Código:", params.IsoCode, "Mensaje:", params.ResponseMessage)
@@ -193,7 +213,7 @@ Para anular una transacción, necesitas el `AzulOrderID` del pago original:
 result := client.BuildVoidForm(azul.VoidRequest{
     OrderNumber: "ORD-1234",        // tu referencia original
     AzulOrderID: "abc-def-123",     // de params.AzulOrderID del pago original
-    Amount:      250000,            // monto original
+    Amount:      2500.00,           // monto original
     ITBIS:       0,                 // ITBIS original
 })
 
@@ -218,26 +238,67 @@ azul.GenerateOrderNumber("LPJ")  // → "LPJ-1709234567890"
 azul.GenerateOrderNumber("INV")  // → "INV-1709234567890"
 ```
 
-### `azul.FormatAmount(cents)`
+### `azul.FormatAmount(amount)`
 
-Convierte centavos a formato Azul (string sin separador decimal, mínimo 3 chars):
+Convierte un monto monetario al formato string que espera Azul (sin separador decimal, mínimo 3 chars):
 
 ```go
 azul.FormatAmount(0)       // → "000"
-azul.FormatAmount(50)      // → "050"
-azul.FormatAmount(1500)    // → "1500"     (= RD$15.00)
-azul.FormatAmount(150000)  // → "150000"   (= RD$1,500.00)
+azul.FormatAmount(0.50)    // → "050"
+azul.FormatAmount(15.00)   // → "1500"
+azul.FormatAmount(1500.00) // → "150000"
+azul.FormatAmount(1234.56) // → "123456"
 ```
 
 ### `azul.ParseAmount(s)`
 
-Inverso de FormatAmount — convierte string de Azul a centavos:
+Inverso de FormatAmount — convierte string de Azul a monto monetario:
 
 ```go
-azul.ParseAmount("000")    // → 0
-azul.ParseAmount("1500")   // → 1500
-azul.ParseAmount("150000") // → 150000
+azul.ParseAmount("000")    // → 0.00
+azul.ParseAmount("050")    // → 0.50
+azul.ParseAmount("1500")   // → 15.00
+azul.ParseAmount("150000") // → 1500.00
+azul.ParseAmount("123456") // → 1234.56
 ```
+
+---
+
+## Monedas
+
+La librería soporta múltiples monedas. La moneda se puede configurar a nivel global (Config) o por transacción:
+
+### Moneda por defecto en Config
+
+```go
+// Comercio que solo opera en pesos
+client := azul.NewClient(azul.Config{
+    CurrencyCode: "$",   // DOP — este es el default si no lo pasas
+    // ...
+})
+
+// Comercio que solo opera en dólares
+client := azul.NewClient(azul.Config{
+    CurrencyCode: "USD",
+    // ...
+})
+```
+
+### Override por transacción
+
+```go
+// Cliente configurado en pesos, pero esta orden es en dólares
+result := client.BuildPaymentForm(azul.PaymentRequest{
+    OrderNumber:  "ORD-USD-1",
+    Amount:       50.00,
+    CurrencyCode: "USD", // override solo para esta transacción
+})
+```
+
+| CurrencyCode | Moneda |
+|---|---|
+| `"$"` | Peso Dominicano (DOP) — default |
+| `"USD"` | Dólar Estadounidense |
 
 ---
 
@@ -287,8 +348,8 @@ Si Azul no devuelve AuthHash (string vacío), `ValidateCallback` retorna `true` 
 | Campo | Tipo | Descripción |
 |-------|------|-------------|
 | `OrderNumber` | `string` | Tu número de orden original |
-| `Amount` | `string` | Monto en formato Azul |
-| `ITBIS` | `string` | Impuesto en formato Azul |
+| `Amount` | `string` | Monto en formato Azul (usa `ParseAmount` para convertir) |
+| `ITBIS` | `string` | Impuesto en formato Azul (usa `ParseAmount` para convertir) |
 | `AuthorizationCode` | `string` | Código de autorización del banco |
 | `DateTime` | `string` | Fecha/hora de la transacción |
 | `ResponseCode` | `string` | `"ISO8583"` si el banco respondió |
@@ -357,16 +418,16 @@ Azul espera el campo ITBIS por separado, pero hay dos estrategias:
 ```go
 result := client.BuildPaymentForm(azul.PaymentRequest{
     OrderNumber: "ORD-1",
-    Amount:      118000, // RD$1,180.00 (incluye ITBIS)
-    ITBIS:       0,      // enviar 0 porque ya está incluido
+    Amount:      1180.00, // RD$1,180.00 (incluye ITBIS)
+    ITBIS:       0,       // enviar 0 porque ya está incluido
 })
 ```
 
 ### Opción B: ITBIS separado
 
 ```go
-subtotal := int64(100000) // RD$1,000.00
-itbis := int64(18000)     // 18%
+subtotal := 1000.00 // RD$1,000.00
+itbis := 180.00     // 18%
 total := subtotal + itbis
 
 result := client.BuildPaymentForm(azul.PaymentRequest{

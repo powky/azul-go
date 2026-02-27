@@ -35,6 +35,9 @@ func TestConfigDefaults(t *testing.T) {
 	if c.config.TerminalID != "00000001" {
 		t.Errorf("expected TerminalID=00000001, got %q", c.config.TerminalID)
 	}
+	if c.config.CurrencyCode != "$" {
+		t.Errorf("expected CurrencyCode=$, got %q", c.config.CurrencyCode)
+	}
 }
 
 // ============================================================================
@@ -46,7 +49,7 @@ func TestBuildPaymentForm(t *testing.T) {
 
 	result := client.BuildPaymentForm(PaymentRequest{
 		OrderNumber: "ORD-123",
-		Amount:      150000,
+		Amount:      1500.00, // RD$1,500.00
 		ITBIS:       0,
 	})
 
@@ -83,6 +86,9 @@ func TestBuildPaymentForm(t *testing.T) {
 	if result.Fields["OrderNumber"] != "ORD-123" {
 		t.Errorf("unexpected OrderNumber: %q", result.Fields["OrderNumber"])
 	}
+	if result.Fields["CurrencyCode"] != "$" {
+		t.Errorf("unexpected CurrencyCode: %q", result.Fields["CurrencyCode"])
+	}
 
 	// AuthHash should be lowercase hex
 	hash := result.Fields["AuthHash"]
@@ -106,7 +112,7 @@ func TestBuildPaymentFormProduction(t *testing.T) {
 
 	result := client.BuildPaymentForm(PaymentRequest{
 		OrderNumber: "ORD-1",
-		Amount:      1000,
+		Amount:      10.00,
 	})
 
 	if result.ActionURL != ProductionURL {
@@ -114,6 +120,41 @@ func TestBuildPaymentFormProduction(t *testing.T) {
 	}
 	if result.AltActionURL != ProductionAltURL {
 		t.Errorf("expected production alt URL, got %q", result.AltActionURL)
+	}
+}
+
+func TestBuildPaymentFormCurrencyOverride(t *testing.T) {
+	client := testClient() // default CurrencyCode = "$"
+
+	result := client.BuildPaymentForm(PaymentRequest{
+		OrderNumber:  "ORD-USD-1",
+		Amount:       50.00,
+		CurrencyCode: "USD",
+	})
+
+	if result.Fields["CurrencyCode"] != "USD" {
+		t.Errorf("expected CurrencyCode=USD, got %q", result.Fields["CurrencyCode"])
+	}
+}
+
+func TestBuildPaymentFormConfigCurrency(t *testing.T) {
+	client := NewClient(Config{
+		MerchantID:   "123",
+		AuthKey:      "key",
+		Environment:  "test",
+		CurrencyCode: "USD",
+		ApprovedURL:  "https://myapp.com/ok",
+		DeclinedURL:  "https://myapp.com/fail",
+		CancelURL:    "https://myapp.com/cancel",
+	})
+
+	result := client.BuildPaymentForm(PaymentRequest{
+		OrderNumber: "ORD-1",
+		Amount:      25.00,
+	})
+
+	if result.Fields["CurrencyCode"] != "USD" {
+		t.Errorf("expected CurrencyCode=USD from config, got %q", result.Fields["CurrencyCode"])
 	}
 }
 
@@ -127,7 +168,7 @@ func TestBuildVoidForm(t *testing.T) {
 	result := client.BuildVoidForm(VoidRequest{
 		OrderNumber: "ORD-123",
 		AzulOrderID: "azul-txn-456",
-		Amount:      150000,
+		Amount:      1500.00,
 		ITBIS:       0,
 	})
 
@@ -136,6 +177,9 @@ func TestBuildVoidForm(t *testing.T) {
 	}
 	if result.Fields["AzulOrderId"] != "azul-txn-456" {
 		t.Errorf("unexpected AzulOrderId: %q", result.Fields["AzulOrderId"])
+	}
+	if result.Fields["Amount"] != "150000" {
+		t.Errorf("unexpected Amount: %q", result.Fields["Amount"])
 	}
 
 	// Void uses ApprovedURL as fallback when VoidCallbackURL is empty
@@ -158,7 +202,7 @@ func TestBuildVoidFormWithCallback(t *testing.T) {
 	result := client.BuildVoidForm(VoidRequest{
 		OrderNumber: "ORD-1",
 		AzulOrderID: "azul-1",
-		Amount:      1000,
+		Amount:      10.00,
 	})
 
 	// Should use VoidCallbackURL for all three URLs
@@ -167,6 +211,21 @@ func TestBuildVoidFormWithCallback(t *testing.T) {
 	}
 	if result.Fields["DeclinedUrl"] != "https://myapp.com/void-callback" {
 		t.Errorf("expected VoidCallbackURL for declined, got %q", result.Fields["DeclinedUrl"])
+	}
+}
+
+func TestBuildVoidFormCurrencyOverride(t *testing.T) {
+	client := testClient()
+
+	result := client.BuildVoidForm(VoidRequest{
+		OrderNumber:  "ORD-1",
+		AzulOrderID:  "azul-1",
+		Amount:       100.00,
+		CurrencyCode: "USD",
+	})
+
+	if result.Fields["CurrencyCode"] != "USD" {
+		t.Errorf("expected CurrencyCode=USD, got %q", result.Fields["CurrencyCode"])
 	}
 }
 
@@ -193,7 +252,7 @@ func TestValidateCallbackWithValidHash(t *testing.T) {
 	// Build a payment to get valid fields
 	result := client.BuildPaymentForm(PaymentRequest{
 		OrderNumber: "ORD-HASH-TEST",
-		Amount:      50000,
+		Amount:      500.00,
 		ITBIS:       0,
 	})
 
@@ -268,22 +327,24 @@ func TestIsApproved(t *testing.T) {
 
 func TestFormatAmount(t *testing.T) {
 	tests := []struct {
-		cents    int64
+		amount   float64
 		expected string
 	}{
 		{0, "000"},
-		{1, "001"},
-		{50, "050"},
-		{99, "099"},
-		{100, "100"},
-		{1500, "1500"},
-		{150000, "150000"},
-		{1000000, "1000000"},
+		{0.01, "001"},
+		{0.50, "050"},
+		{0.99, "099"},
+		{1.00, "100"},
+		{15.00, "1500"},
+		{1500.00, "150000"},
+		{10000.00, "1000000"},
+		{1234.56, "123456"},
+		{0.10, "010"},
 	}
 	for _, tt := range tests {
-		got := FormatAmount(tt.cents)
+		got := FormatAmount(tt.amount)
 		if got != tt.expected {
-			t.Errorf("FormatAmount(%d) = %q, want %q", tt.cents, got, tt.expected)
+			t.Errorf("FormatAmount(%v) = %q, want %q", tt.amount, got, tt.expected)
 		}
 	}
 }
@@ -291,19 +352,31 @@ func TestFormatAmount(t *testing.T) {
 func TestParseAmount(t *testing.T) {
 	tests := []struct {
 		input    string
-		expected int64
+		expected float64
 	}{
 		{"000", 0},
-		{"050", 50},
-		{"1500", 1500},
-		{"150000", 150000},
+		{"050", 0.50},
+		{"1500", 15.00},
+		{"150000", 1500.00},
+		{"123456", 1234.56},
 		{"", 0},
 		{"abc", 0},
 	}
 	for _, tt := range tests {
 		got := ParseAmount(tt.input)
 		if got != tt.expected {
-			t.Errorf("ParseAmount(%q) = %d, want %d", tt.input, got, tt.expected)
+			t.Errorf("ParseAmount(%q) = %v, want %v", tt.input, got, tt.expected)
+		}
+	}
+}
+
+// FormatAmount and ParseAmount should be inverses
+func TestFormatParseRoundTrip(t *testing.T) {
+	amounts := []float64{0, 0.01, 0.50, 1.00, 15.00, 1500.00, 99999.99}
+	for _, amount := range amounts {
+		got := ParseAmount(FormatAmount(amount))
+		if got != amount {
+			t.Errorf("round trip failed for %v: got %v", amount, got)
 		}
 	}
 }
