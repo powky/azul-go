@@ -227,10 +227,21 @@ resp, err := client.TokenSale(ctx, azul.TokenSaleRequest{
 })
 ```
 
-### Hold (Pre-autorización)
+### Hold + Post (Pre-autorización y Captura)
+
+El flujo Hold → Post permite **reservar fondos** en la tarjeta sin cobrar inmediatamente,
+y luego **capturar** (cobrar) cuando estés listo (por ejemplo, al despachar un producto).
+
+**Reglas importantes:**
+- El Post debe realizarse **antes de 7 días** del Hold, o el banco emisor lo elimina automáticamente
+- El monto del Post puede ser **igual o menor** al del Hold (captura parcial)
+- Si el Post es menor al Hold, Azul libera automáticamente la diferencia a la tarjeta
+- El comercio **no recibe liquidación** hasta que se haga el Post
+
+#### Paso 1: Hold (reservar fondos)
 
 ```go
-resp, err := client.Hold(ctx, azul.HoldRequest{
+holdResp, err := client.Hold(ctx, azul.HoldRequest{
     CardNumber:  "4111111111111111",
     Expiration:  "202812",
     CVC:         "123",
@@ -238,52 +249,218 @@ resp, err := client.Hold(ctx, azul.HoldRequest{
     ITBIS:       0,
     OrderNumber: "ORD-HOLD-1",
 })
+if err != nil {
+    log.Fatal(err)
+}
+if !holdResp.IsApproved() {
+    log.Fatal("Hold rechazado:", holdResp.ResponseMessage)
+}
+
+// Guardar holdResp.AzulOrderId para el Post posterior
+fmt.Println("Fondos reservados, AzulOrderId:", holdResp.AzulOrderId)
 ```
 
-### TokenHold (Pre-autorización con token)
+#### Paso 2: Post (capturar el cobro)
 
 ```go
-resp, err := client.TokenHold(ctx, azul.TokenHoldRequest{
+// Captura total (mismo monto del Hold)
+postResp, err := client.Post(ctx, azul.PostRequest{
+    AzulOrderId: holdResp.AzulOrderId, // ID del Hold original
+    Amount:      2000.00,              // Igual al Hold = captura total
+    ITBIS:       0,
+})
+
+// Captura parcial (menor al Hold, Azul libera la diferencia)
+postResp, err := client.Post(ctx, azul.PostRequest{
+    AzulOrderId: holdResp.AzulOrderId,
+    Amount:      1200.00,              // Solo cobra 1200, libera 800
+    ITBIS:       0,
+})
+```
+
+#### Ejemplo completo: e-commerce con Hold + Post
+
+```go
+// 1. Al confirmar el pedido → Hold (reserva fondos)
+holdResp, _ := client.Hold(ctx, azul.HoldRequest{
+    CardNumber:  "4111111111111111",
+    Expiration:  "202812",
+    CVC:         "123",
+    Amount:      3500.00,
+    ITBIS:       630.00,
+    OrderNumber: "ORD-9876",
+})
+// Guardar holdResp.AzulOrderId en tu base de datos
+
+// 2. Al despachar el producto → Post (cobra efectivamente)
+postResp, _ := client.Post(ctx, azul.PostRequest{
+    AzulOrderId: holdResp.AzulOrderId,
+    Amount:      3500.00,
+    ITBIS:       630.00,
+})
+if postResp.IsApproved() {
+    fmt.Println("Cobro realizado exitosamente")
+}
+
+// 3. Si necesitas cancelar antes del Post → Void
+voidResp, _ := client.Void(ctx, azul.APIVoidRequest{
+    AzulOrderId: holdResp.AzulOrderId,
+})
+```
+
+#### TokenHold (Pre-autorización con token)
+
+El mismo flujo aplica usando un token DataVault en vez de tarjeta completa:
+
+```go
+holdResp, err := client.TokenHold(ctx, azul.TokenHoldRequest{
     DataVaultToken: "6EF85D01-B07C-4E67-99F7-4E13A449DCDD",
     Amount:         2000.00,
     ITBIS:          0,
     OrderNumber:    "ORD-HOLD-TOKEN-1",
 })
+// Luego usar holdResp.AzulOrderId con Post() igual que arriba
 ```
 
-### Post (Captura de Hold)
+### Void vs Refund (Anulación vs Devolución)
 
-```go
-// Captura total o parcial de un Hold aprobado
-resp, err := client.Post(ctx, azul.PostRequest{
-    AzulOrderId: holdResp.AzulOrderId, // ID del Hold original
-    Amount:      2000.00,              // Igual o menor al monto del Hold
-    ITBIS:       0,
-})
-```
+Void y Refund son dos formas de "devolver" dinero, pero funcionan en momentos distintos:
+
+| | **Void** | **Refund** |
+|---|---|---|
+| **Cuándo** | Mismo día, antes del cierre de lote (~20 min) | Después del cierre de lote (días/semanas después) |
+| **Qué hace** | Cancela la transacción como si nunca existió | Genera un nuevo movimiento de devolución al tarjetahabiente |
+| **Monto** | Siempre el total | Total o parcial |
+| **Datos necesarios** | Solo AzulOrderId | Tarjeta completa + AzulOrderId + fecha original |
+
+#### ¿Cuándo usar cada uno?
+
+**Venta directa (Sale):**
+- Cliente cancela en los próximos minutos → **Void**
+- Cliente pide devolución días después → **Refund**
+
+**Hold + Post:**
+- Quieres cancelar el Hold sin cobrar → **Void** del Hold (o simplemente no hacer Post y se libera en 7 días)
+- Ya hiciste Post y el cliente cancela de inmediato → **Void** del Post
+- Ya hiciste Post y pasaron días → **Refund**
+
+**Hold sin Post:**
+- No necesitas Refund. Un Hold sin Post no cobra al cliente. Usa **Void** para liberarlo inmediatamente, o déjalo expirar (7 días).
 
 ### Void (Anulación)
 
 ```go
+// Anular una transacción reciente (Sale, Hold, o Post)
 resp, err := client.Void(ctx, azul.APIVoidRequest{
-    AzulOrderId: "18527",
+    AzulOrderId: "18527", // ID de la transacción a anular
 })
+if resp.IsApproved() {
+    fmt.Println("Transacción anulada exitosamente")
+}
 ```
 
 ### Refund (Devolución)
 
+Para devolver dinero después del cierre de lote. Requiere los datos de la tarjeta
+y la información de la transacción original.
+
 ```go
+// Devolución total
 resp, err := client.Refund(ctx, azul.RefundRequest{
     CardNumber:   "4111111111111111",
     Expiration:   "202812",
     CVC:          "123",
-    Amount:       300.00,
-    ITBIS:        0,
-    OriginalDate: "20250115",       // Fecha de la transacción original (YYYYMMDD)
-    AzulOrderId:  "11350",          // ID de la transacción original
+    Amount:       1500.00,             // Monto total original
+    ITBIS:        270.00,
+    OriginalDate: "20250115",          // Fecha de la transacción original (YYYYMMDD)
+    AzulOrderId:  "11350",             // AzulOrderId de la transacción original
     OrderNumber:  "ORD-REFUND-1",
 })
 ```
+
+```go
+// Devolución parcial (solo parte del monto)
+resp, err := client.Refund(ctx, azul.RefundRequest{
+    CardNumber:   "4111111111111111",
+    Expiration:   "202812",
+    CVC:          "123",
+    Amount:       500.00,              // Solo devuelve 500 de los 1500 originales
+    ITBIS:        90.00,
+    OriginalDate: "20250115",
+    AzulOrderId:  "11350",
+    OrderNumber:  "ORD-REFUND-2",
+})
+```
+
+#### Ejemplo completo: ciclo de vida con tarjeta
+
+```go
+// 1. Venta directa
+saleResp, _ := client.Sale(ctx, azul.SaleRequest{
+    CardNumber:  "4111111111111111",
+    Expiration:  "202812",
+    CVC:         "123",
+    Amount:      2000.00,
+    ITBIS:       360.00,
+    OrderNumber: "ORD-500",
+})
+// Guardar saleResp.AzulOrderId y saleResp.DateTime
+
+// 2a. Si el cliente cancela en los próximos minutos → Void
+voidResp, _ := client.Void(ctx, azul.APIVoidRequest{
+    AzulOrderId: saleResp.AzulOrderId,
+})
+
+// 2b. Si el cliente pide devolución días después → Refund
+refundResp, _ := client.Refund(ctx, azul.RefundRequest{
+    CardNumber:   "4111111111111111",
+    Expiration:   "202812",
+    CVC:          "123",
+    Amount:       2000.00,
+    ITBIS:        360.00,
+    OriginalDate: "20250115",              // Fecha del Sale original
+    AzulOrderId:  saleResp.AzulOrderId,    // ID del Sale original
+    OrderNumber:  "ORD-REFUND-500",
+})
+```
+
+#### Ejemplo completo: ciclo de vida con token
+
+```go
+// 1. Cobro con token (cliente recurrente)
+saleResp, _ := client.TokenSale(ctx, azul.TokenSaleRequest{
+    DataVaultToken: "6EF85D01-B07C-4E67-99F7-4E13A449DCDD",
+    Amount:         2000.00,
+    ITBIS:          360.00,
+    OrderNumber:    "ORD-TOKEN-500",
+    CustomOrderId:  "PEDIDO-500",
+})
+// Guardar saleResp.AzulOrderId
+
+// 2a. Cancelar de inmediato → Void (igual que con tarjeta, solo necesita AzulOrderId)
+voidResp, _ := client.Void(ctx, azul.APIVoidRequest{
+    AzulOrderId: saleResp.AzulOrderId,
+})
+
+// 2b. Devolución días después → Refund
+// NOTA: Refund siempre necesita los datos de la tarjeta original,
+// incluso si el cobro se hizo con token. El token no sirve para Refund.
+refundResp, _ := client.Refund(ctx, azul.RefundRequest{
+    CardNumber:   "4111111111111111",    // Tarjeta original del token
+    Expiration:   "202812",
+    CVC:          "123",
+    Amount:       2000.00,
+    ITBIS:        360.00,
+    OriginalDate: "20250120",
+    AzulOrderId:  saleResp.AzulOrderId,
+    OrderNumber:  "ORD-REFUND-TOKEN-500",
+})
+```
+
+> **Nota importante sobre Refund con tokens:** El endpoint de Refund de Azul requiere
+> los datos de la tarjeta física (CardNumber, Expiration, CVC), no acepta DataVaultToken.
+> Si cobraste con token y necesitas hacer Refund, debes tener guardados los datos de la
+> tarjeta original o usar el backoffice de Azul.
 
 ### VerifyPayment
 
