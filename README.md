@@ -146,6 +146,17 @@ result := client.BuildVoidForm(azul.VoidRequest{
 })
 ```
 
+### Limitaciones de HPP
+
+La Página de Pago (HPP) de Azul **no soporta** las siguientes operaciones:
+
+- **Suscripciones (pagos recurrentes)**: Solo disponibles vía Webservices API (`CreateSubscription`)
+- **Hold / Post**: Pre-autorizaciones y capturas solo vía API
+- **Refund**: Devoluciones solo vía API o backoffice de Azul
+- **SearchPayments**: Búsqueda de transacciones solo vía API
+
+HPP solo soporta: pagos directos, DataVault (guardar/pagar con token) y anulaciones (Void).
+
 ---
 
 ## API Client (Webservices server-to-server)
