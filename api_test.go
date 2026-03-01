@@ -1680,6 +1680,238 @@ func TestCreateSubscriptionCurrencyOverride(t *testing.T) {
 }
 
 // ============================================================================
+// TokenSubscription
+// ============================================================================
+
+func TestTokenSubscriptionMonthly(t *testing.T) {
+	var capturedBody map[string]interface{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody = parseRequestBody(t, r)
+
+		if r.URL.RawQuery != "recurringsubscriptioncreate" {
+			t.Errorf("expected query recurringsubscriptioncreate, got %q", r.URL.RawQuery)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{
+			"CustomSubscriptionId": "010",
+			"ErrorDescription": "",
+			"NextScheduledDate": "2025-8-15",
+			"ResponseCode": "CREATED"
+		}`))
+	}))
+	defer server.Close()
+
+	client := newTestAPIClient(t, server)
+
+	resp, err := client.TokenSubscription(context.Background(), TokenSubscriptionRequest{
+		DataVaultToken:    "6EF85D01-B07C-4E67-99F7-4E13A449DCDD",
+		Amount:            500.00,
+		ITBIS:             90.00,
+		Frequency:         "MonthlyByDay",
+		EveryXMonths:      "1",
+		DayOfMonth:        "15",
+		Month:             "7",
+		StartDate:         "2025-7-15",
+		CustomerName:      "Juan Pérez",
+		CustomerContract:  "PREMIUM-001",
+		CustomerIdentType: "Cedula",
+		CustomerIdentNum:  "00100204566",
+	})
+	if err != nil {
+		t.Fatalf("TokenSubscription() error: %v", err)
+	}
+
+	if !resp.WasCreated() {
+		t.Error("expected WasCreated() = true")
+	}
+	if resp.CustomSubscriptionId != "010" {
+		t.Errorf("unexpected CustomSubscriptionId: %q", resp.CustomSubscriptionId)
+	}
+	if resp.NextScheduledDate != "2025-8-15" {
+		t.Errorf("unexpected NextScheduledDate: %q", resp.NextScheduledDate)
+	}
+
+	// CardNumber and CardExpiration must be empty when using token
+	if capturedBody["CardNumber"] != "" {
+		t.Errorf("expected CardNumber empty, got %v", capturedBody["CardNumber"])
+	}
+	if capturedBody["CardExpiration"] != "" {
+		t.Errorf("expected CardExpiration empty, got %v", capturedBody["CardExpiration"])
+	}
+
+	// Token should be in CustomerSubscriptionId
+	if capturedBody["CustomerSubscriptionId"] != "6EF85D01-B07C-4E67-99F7-4E13A449DCDD" {
+		t.Errorf("unexpected CustomerSubscriptionId: %v", capturedBody["CustomerSubscriptionId"])
+	}
+
+	// CVC should be empty (not sent)
+	if capturedBody["CVC"] != "" {
+		t.Errorf("expected CVC empty, got %v", capturedBody["CVC"])
+	}
+
+	// Amount decimal format
+	if amt, ok := capturedBody["Amount"].(float64); !ok || amt != 500.0 {
+		t.Errorf("expected Amount=500.0, got %v", capturedBody["Amount"])
+	}
+	if itbis, ok := capturedBody["Itbis"].(float64); !ok || itbis != 90.0 {
+		t.Errorf("expected Itbis=90.0, got %v", capturedBody["Itbis"])
+	}
+
+	// Currency defaults to DOP
+	if capturedBody["Currency"] != "DOP" {
+		t.Errorf("expected Currency=DOP, got %v", capturedBody["Currency"])
+	}
+
+	// SaveToDataVault should be 0 (token already exists)
+	if sdv, ok := capturedBody["SaveToDataVault"].(float64); !ok || sdv != 0 {
+		t.Errorf("expected SaveToDataVault=0, got %v", capturedBody["SaveToDataVault"])
+	}
+
+	// Backup cards should be null
+	if capturedBody["Card2Number"] != nil {
+		t.Errorf("expected Card2Number=null, got %v", capturedBody["Card2Number"])
+	}
+	if capturedBody["Card3Number"] != nil {
+		t.Errorf("expected Card3Number=null, got %v", capturedBody["Card3Number"])
+	}
+
+	// Frequency fields
+	if capturedBody["Frequency"] != "MonthlyByDay" {
+		t.Errorf("unexpected Frequency: %v", capturedBody["Frequency"])
+	}
+	if capturedBody["FrequencyParamEveryXMonths"] != "1" {
+		t.Errorf("unexpected FrequencyParamEveryXMonths: %v", capturedBody["FrequencyParamEveryXMonths"])
+	}
+	if capturedBody["FrequencyParamDay"] != "15" {
+		t.Errorf("unexpected FrequencyParamDay: %v", capturedBody["FrequencyParamDay"])
+	}
+}
+
+func TestTokenSubscriptionWithCVC(t *testing.T) {
+	var capturedBody map[string]interface{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody = parseRequestBody(t, r)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"CustomSubscriptionId":"011","ErrorDescription":"","NextScheduledDate":"2025-8-1","ResponseCode":"CREATED"}`))
+	}))
+	defer server.Close()
+
+	client := newTestAPIClient(t, server)
+
+	_, err := client.TokenSubscription(context.Background(), TokenSubscriptionRequest{
+		DataVaultToken:    "AAAA-BBBB-CCCC-DDDD",
+		CVC:               "456",
+		Amount:            100.00,
+		ITBIS:             0,
+		Frequency:         "Daily",
+		EveryXDays:        "1",
+		Month:             "8",
+		StartDate:         "2025-8-1",
+		CustomerName:      "María López",
+		CustomerContract:  "CVC-TEST",
+		CustomerIdentType: "Cedula",
+		CustomerIdentNum:  "00100208665",
+	})
+	if err != nil {
+		t.Fatalf("TokenSubscription() error: %v", err)
+	}
+
+	// CVC should be present
+	if capturedBody["CVC"] != "456" {
+		t.Errorf("expected CVC=456, got %v", capturedBody["CVC"])
+	}
+
+	// Card data should still be empty
+	if capturedBody["CardNumber"] != "" {
+		t.Errorf("expected CardNumber empty, got %v", capturedBody["CardNumber"])
+	}
+	if capturedBody["CardExpiration"] != "" {
+		t.Errorf("expected CardExpiration empty, got %v", capturedBody["CardExpiration"])
+	}
+
+	// Token in CustomerSubscriptionId
+	if capturedBody["CustomerSubscriptionId"] != "AAAA-BBBB-CCCC-DDDD" {
+		t.Errorf("unexpected CustomerSubscriptionId: %v", capturedBody["CustomerSubscriptionId"])
+	}
+}
+
+func TestTokenSubscriptionError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{
+			"CustomSubscriptionId": "",
+			"ErrorDescription": "INVALID TOKEN",
+			"NextScheduledDate": "",
+			"ResponseCode": "Error"
+		}`))
+	}))
+	defer server.Close()
+
+	client := newTestAPIClient(t, server)
+
+	resp, err := client.TokenSubscription(context.Background(), TokenSubscriptionRequest{
+		DataVaultToken:    "INVALID-TOKEN",
+		Amount:            50.00,
+		Frequency:         "Daily",
+		EveryXDays:        "1",
+		StartDate:         "2025-1-1",
+		CustomerName:      "Test",
+		CustomerContract:  "ERR-001",
+		CustomerIdentType: "Cedula",
+		CustomerIdentNum:  "001002",
+	})
+	if err != nil {
+		t.Fatalf("TokenSubscription() error: %v", err)
+	}
+
+	if resp.WasCreated() {
+		t.Error("expected WasCreated() = false")
+	}
+	if !resp.HasError() {
+		t.Error("expected HasError() = true")
+	}
+	if resp.ErrorDescription != "INVALID TOKEN" {
+		t.Errorf("unexpected ErrorDescription: %q", resp.ErrorDescription)
+	}
+}
+
+func TestTokenSubscriptionCurrencyOverride(t *testing.T) {
+	var capturedBody map[string]interface{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody = parseRequestBody(t, r)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"CustomSubscriptionId":"012","ErrorDescription":"","NextScheduledDate":"2025-1-1","ResponseCode":"CREATED"}`))
+	}))
+	defer server.Close()
+
+	client := newTestAPIClient(t, server)
+
+	_, err := client.TokenSubscription(context.Background(), TokenSubscriptionRequest{
+		DataVaultToken:    "TOKEN-USD",
+		Amount:            25.00,
+		Currency:          "USD",
+		Frequency:         "Daily",
+		EveryXDays:        "1",
+		StartDate:         "2025-1-1",
+		CustomerName:      "Test",
+		CustomerContract:  "USD-001",
+		CustomerIdentType: "Cedula",
+		CustomerIdentNum:  "001002",
+	})
+	if err != nil {
+		t.Fatalf("TokenSubscription() error: %v", err)
+	}
+
+	if capturedBody["Currency"] != "USD" {
+		t.Errorf("expected Currency=USD, got %v", capturedBody["Currency"])
+	}
+}
+
+// ============================================================================
 // Fallback URL
 // ============================================================================
 

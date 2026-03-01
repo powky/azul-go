@@ -1,6 +1,6 @@
 # azul-go
 
-> **v0.3.0** — Nuevo: CreateSubscription (pagos recurrentes). Ver [Changelog](#changelog).
+> **v0.3.1** — Nuevo: TokenSubscription (suscripciones con token DataVault). Ver [Changelog](#changelog).
 
 Cliente Go para **Azul** — la pasarela de pago de República Dominicana.
 
@@ -30,6 +30,7 @@ Dos modos de integración:
 - **DeleteToken**: Elimina un token del DataVault
 - **SearchPayments**: Búsqueda de transacciones por rango de fechas
 - **CreateSubscription**: Suscripciones recurrentes (cobros automáticos diarios, semanales o mensuales)
+- **TokenSubscription**: Suscripciones recurrentes usando token DataVault (sin datos de tarjeta)
 - Fallback automático al URL secundario en producción
 - TLS mutual authentication con certificados de Azul
 
@@ -636,6 +637,41 @@ resp, err := client.CreateSubscription(ctx, azul.SubscriptionRequest{
 > `NextScheduledDate`, `ResponseCode`). Usa `resp.WasCreated()` para verificar éxito
 > (`ResponseCode == "CREATED"`).
 
+### TokenSubscription (Suscripción con token DataVault)
+
+Si ya tienes un token DataVault del cliente, puedes crear la suscripción sin enviar datos
+de tarjeta. Azul usa el `CustomerSubscriptionId` (el token) en lugar de CardNumber/Expiration.
+
+> **Nota sobre CVC:** Según la documentación de Azul, el envío de CVC cuando se usa token
+> es opcional para E-Commerce (depende del acuerdo con tu representante de Azul).
+> Para transacciones MOTO, no se debe enviar CVC.
+
+```go
+resp, err := client.TokenSubscription(ctx, azul.TokenSubscriptionRequest{
+    DataVaultToken: "6EF85D01-B07C-4E67-99F7-4E13A449DCDD",
+    Amount:         500.00,              // Decimal (NO centavos)
+    ITBIS:          90.00,
+    Frequency:      "MonthlyByDay",
+    EveryXMonths:   "1",
+    DayOfMonth:     "15",
+    Month:          "7",
+    StartDate:      "2025-7-15",
+    CustomerName:       "Juan Pérez",
+    CustomerContract:   "PREMIUM-001",
+    CustomerIdentType:  "Cedula",
+    CustomerIdentNum:   "00100204566",
+    CustomerEmail:      "juan@example.com",
+    NotifyTransactions: true,
+    Description:        "Plan Premium mensual con token",
+})
+if resp.WasCreated() {
+    fmt.Println("Suscripción con token creada, próximo cobro:", resp.NextScheduledDate)
+}
+```
+
+> **Nota:** `TokenSubscription` envía CardNumber y CardExpiration vacíos automáticamente.
+> No soporta tarjetas de respaldo (Card2/Card3) ya que el token reemplaza la tarjeta.
+
 ---
 
 ## APIResponse
@@ -727,7 +763,7 @@ azul.ParseAmount("150000") // → 1500.00
 go test ./... -v
 ```
 
-70 tests: 26 HPP + 44 API.
+74 tests: 26 HPP + 48 API.
 
 ---
 
@@ -781,6 +817,13 @@ Las constantes `TestURL`, `ProductionURL`, `ProductionAltURL` siguen disponibles
 ---
 
 ## Changelog
+
+### v0.3.1
+
+- `TokenSubscription`: Suscripciones recurrentes usando token DataVault (sin datos de tarjeta)
+  - CardNumber y CardExpiration se envían vacíos automáticamente
+  - CVC opcional según acuerdo con Azul
+- 4 tests nuevos (74 tests totales)
 
 ### v0.3.0
 
