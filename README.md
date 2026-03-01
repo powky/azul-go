@@ -1,478 +1,365 @@
 # azul-go
 
-> **v0.0.2**
+> **v0.1.0** — Breaking changes desde v0.0.2. Ver [Changelog](#changelog).
 
-Cliente Go para **Azul Payment Page (HPP)** — la pasarela de pago estándar de Azul en República Dominicana.
+Cliente Go para **Azul** — la pasarela de pago de República Dominicana.
+
+Dos modos de integración:
+
+- **HPPClient**: Página de Pago Alojada (redirect del browser con formularios HTML + HMAC)
+- **APIClient**: Webservices API (server-to-server vía JSON + TLS mutual auth)
 
 ## Qué hace esta librería
 
-- Genera los campos del formulario HTML + el AuthHash HMAC-SHA512 para redirigir al usuario a Azul
-- Valida el hash de retorno cuando Azul redirige de vuelta a tu app (previene fraude)
-- Genera los campos del formulario para anular (VOID) una transacción
-- Convierte montos entre formato legible (1500.00) y formato Azul ("150000")
-- Soporta múltiples monedas ("$" para DOP, "USD" para dólares)
-- Genera números de orden únicos
-- **DataVault**: Guarda tarjetas tokenizadas para pagos futuros sin re-ingresar datos
-- **Últimos 4 dígitos**: Extrae de forma segura los últimos 4 dígitos del número de tarjeta del callback
+### HPP (Página de Pago)
+- Genera los campos del formulario HTML + el AuthHash HMAC-SHA512 para redirigir a Azul
+- Valida el hash de retorno cuando Azul redirige de vuelta (previene fraude)
+- Genera los campos para anulaciones (VOID) vía redirect
+- Soporta DataVault: guardar tarjetas tokenizadas y pagar con tokens
+
+### API (Webservices server-to-server)
+- **Sale**: Cobro directo con tarjeta completa
+- **TokenSale**: Cobro con token DataVault (sin datos de tarjeta)
+- **Hold**: Pre-autorización (reserva el monto sin capturar)
+- **Refund**: Devolución de fondos al tarjetahabiente
+- **Void**: Anulación de transacción (dentro de 20 min)
+- **VerifyPayment**: Verifica el estado de una transacción anterior
+- **CreateToken**: Tokeniza una tarjeta sin hacer cobro
+- **DeleteToken**: Elimina un token del DataVault
+- Fallback automático al URL secundario en producción
+- TLS mutual authentication con certificados de Azul
+
+### Compartido
+- Formato de montos: `FormatAmount(1500.00)` → `"150000"`, `ParseAmount("150000")` → `1500.00`
+- Generación de números de orden únicos
+- Soporte multi-moneda (`"$"` DOP, `"USD"`)
 
 ## Qué NO hace
 
-- No hace requests HTTP (tú manejas el formulario/redirect)
-- No maneja lógica de negocio (órdenes, stock, emails, etc.)
-- No persiste datos (tú decides dónde guardar)
+- No persiste datos (tú decides dónde guardar tokens, órdenes, etc.)
+- No maneja lógica de negocio (stock, emails, etc.)
+
+---
 
 ## Instalación
 
 ```bash
-go get github.com/ianfdev/azul-go
+go get github.com/powky/azul-go
 ```
 
-## Inicio rápido
+Sin dependencias externas — solo stdlib de Go.
+
+---
+
+## HPP Client (Página de Pago)
+
+### Configuración
 
 ```go
-package main
-
-import (
-    "fmt"
-    "os"
-
-    azul "github.com/ianfdev/azul-go"
-)
-
-func main() {
-    // 1. Crear cliente
-    client := azul.NewClient(azul.Config{
-        MerchantID:   os.Getenv("AZUL_MERCHANT_ID"),
-        AuthKey:      os.Getenv("AZUL_AUTH_KEY"),
-        MerchantName: "Mi Tienda",
-        MerchantType: "ECommerce",  // opcional, default "ECommerce"
-        TerminalID:   "00000001",   // opcional, default "00000001"
-        CurrencyCode: "$",          // opcional, default "$" (DOP). Usa "USD" para dólares
-        Environment:  "test",       // "test" o "production"
-        ApprovedURL:  "https://mitienda.com/pago/aprobado",
-        DeclinedURL:  "https://mitienda.com/pago/rechazado",
-        CancelURL:    "https://mitienda.com/pago/cancelado",
-    })
-
-    // 2. Generar formulario de pago
-    result := client.BuildPaymentForm(azul.PaymentRequest{
-        OrderNumber: azul.GenerateOrderNumber("ORD"),
-        Amount:      1500.00, // RD$1,500.00
-        ITBIS:       0,       // 0 si ya está incluido en Amount
-    })
-
-    fmt.Println("POST a:", result.ActionURL)
-    fmt.Println("Campos:", result.Fields)
-}
+client := azul.NewHPPClient(azul.HPPConfig{
+    MerchantID:   os.Getenv("AZUL_MERCHANT_ID"),
+    AuthKey:      os.Getenv("AZUL_AUTH_KEY"),
+    MerchantName: "Mi Tienda",
+    MerchantType: "ECommerce",  // default "ECommerce"
+    TerminalID:   "00000001",   // default "00000001"
+    CurrencyCode: "$",          // default "$" (DOP)
+    Environment:  "test",       // "test" o "production"
+    ApprovedURL:  "https://mitienda.com/pago/aprobado",
+    DeclinedURL:  "https://mitienda.com/pago/rechazado",
+    CancelURL:    "https://mitienda.com/pago/cancelado",
+})
 ```
 
----
-
-## Configuración
-
-### `azul.Config`
-
-| Campo | Tipo | Requerido | Default | Descripción |
-|-------|------|-----------|---------|-------------|
-| `MerchantID` | `string` | ✅ | — | ID del comercio asignado por Azul (ej: `"39038540035"`) |
-| `AuthKey` | `string` | ✅ | — | Clave HMAC secreta proporcionada por Azul |
-| `MerchantName` | `string` | ✅ | — | Nombre que aparece en la página de pago de Azul |
-| `MerchantType` | `string` | — | `"ECommerce"` | Tipo de integración |
-| `TerminalID` | `string` | — | `"00000001"` | Terminal asignada por Azul |
-| `CurrencyCode` | `string` | — | `"$"` | Moneda por defecto: `"$"` (DOP) o `"USD"` |
-| `Environment` | `string` | ✅ | — | `"test"` o `"production"` |
-| `ApprovedURL` | `string` | ✅ | — | URL de redirección tras pago exitoso |
-| `DeclinedURL` | `string` | ✅ | — | URL de redirección tras pago rechazado |
-| `CancelURL` | `string` | ✅ | — | URL de redirección si el usuario cancela |
-| `VoidCallbackURL` | `string` | — | `ApprovedURL` | URL de redirección tras VOID |
-
-### Variables de entorno recomendadas
-
-```env
-AZUL_MERCHANT_ID=39038540035
-AZUL_AUTH_KEY=tu-clave-secreta
-AZUL_MERCHANT_NAME=Mi Tienda
-AZUL_MERCHANT_TYPE=ECommerce
-AZUL_TERMINAL_ID=00000001
-AZUL_CURRENCY_CODE=$
-AZUL_ENVIRONMENT=test
-AZUL_APPROVED_URL=https://mitienda.com/pago/aprobado
-AZUL_DECLINED_URL=https://mitienda.com/pago/rechazado
-AZUL_CANCEL_URL=https://mitienda.com/pago/cancelado
-AZUL_VOID_CALLBACK_URL=https://mitienda.com/pago/void
-```
-
----
-
-## Flujo completo de pago
-
-### Paso 1: Generar formulario de pago
+### Generar formulario de pago
 
 ```go
 result := client.BuildPaymentForm(azul.PaymentRequest{
-    OrderNumber: "ORD-1234",
-    Amount:      2500.00, // RD$2,500.00
+    OrderNumber: azul.GenerateOrderNumber("ORD"),
+    Amount:      1500.00,
     ITBIS:       0,
 })
 
-// result.ActionURL    → URL del POST (Azul Payment Page)
-// result.AltActionURL → URL de fallback (solo producción, vacío en test)
-// result.Fields       → map[string]string con TODOS los campos del form
+// result.ActionURL  → URL del POST
+// result.Fields     → map[string]string con todos los campos hidden
 ```
 
-Para cobrar en dólares, pasa `CurrencyCode` en el request:
+### Validar callback
 
 ```go
-result := client.BuildPaymentForm(azul.PaymentRequest{
-    OrderNumber:  "ORD-1234",
-    Amount:       50.00, // USD$50.00
-    ITBIS:        0,
-    CurrencyCode: "USD", // override del default "$" (DOP)
-})
-```
-
-Tu frontend debe crear un formulario HTML con action=`result.ActionURL` y un `<input type="hidden">` por cada entrada en `result.Fields`:
-
-```html
-<form method="POST" action="{{ .ActionURL }}">
-  {{ range $key, $value := .Fields }}
-    <input type="hidden" name="{{ $key }}" value="{{ $value }}">
-  {{ end }}
-  <button type="submit">Pagar con Azul</button>
-</form>
-```
-
-O si tu frontend es una SPA (React, Vue, etc.), tu API devuelve el JSON y el frontend construye el form dinámicamente:
-
-```json
-{
-  "action_url": "https://pruebas.azul.com.do/PaymentPage/",
-  "alt_action_url": "",
-  "fields": {
-    "MerchantId": "39038540035",
-    "Amount": "250000",
-    "CurrencyCode": "$",
-    "AuthHash": "a1b2c3...",
-    "...": "..."
-  }
-}
-```
-
-### Paso 2: Azul procesa el pago
-
-El usuario completa el pago en la página de Azul. Azul redirige de vuelta a tu `ApprovedURL` o `DeclinedURL` con parámetros en el query string.
-
-### Paso 3: Validar el callback
-
-Cuando Azul redirige de vuelta, tu frontend captura los query params y los envía a tu backend:
-
-```go
-// Parsear los parámetros del callback (de query string o JSON body)
 params := azul.CallbackParams{
-    OrderNumber:         r.FormValue("OrderNumber"),
-    Amount:              r.FormValue("Amount"),
-    ITBIS:               r.FormValue("ITBIS"),
-    AuthorizationCode:   r.FormValue("AuthorizationCode"),
-    DateTime:            r.FormValue("DateTime"),
-    ResponseCode:        r.FormValue("ResponseCode"),
-    IsoCode:             r.FormValue("ISOCode"),
-    ResponseMessage:     r.FormValue("ResponseMessage"),
-    ErrorDescription:    r.FormValue("ErrorDescription"),
-    RRN:                 r.FormValue("RRN"),
-    AuthHash:            r.FormValue("AuthHash"),
-    CardNumber:          r.FormValue("CardNumber"),
-    DataVaultToken:      r.FormValue("DataVaultToken"),
-    DataVaultExpiration: r.FormValue("DataVaultExpiration"),
-    DataVaultBrand:      r.FormValue("DataVaultBrand"),
-    AzulOrderID:         r.FormValue("AzulOrderId"),
+    OrderNumber:       r.FormValue("OrderNumber"),
+    Amount:            r.FormValue("Amount"),
+    AuthorizationCode: r.FormValue("AuthorizationCode"),
+    DateTime:          r.FormValue("DateTime"),
+    ResponseCode:      r.FormValue("ResponseCode"),
+    IsoCode:           r.FormValue("ISOCode"),
+    ResponseMessage:   r.FormValue("ResponseMessage"),
+    ErrorDescription:  r.FormValue("ErrorDescription"),
+    RRN:               r.FormValue("RRN"),
+    AuthHash:          r.FormValue("AuthHash"),
+    CardNumber:        r.FormValue("CardNumber"),
+    DataVaultToken:    r.FormValue("DataVaultToken"),
+    AzulOrderID:       r.FormValue("AzulOrderId"),
 }
 
-// Validar que el hash es legítimo (previene callbacks forjados)
 if !client.ValidateCallback(params) {
-    // HASH INVÁLIDO — posible fraude, rechazar
     http.Error(w, "invalid callback", http.StatusForbidden)
     return
 }
 
-// Convertir el monto de vuelta a número legible
-amount := azul.ParseAmount(params.Amount) // "250000" → 2500.00
-
-// Verificar si el pago fue aprobado
 if client.IsApproved(params) {
-    // PAGO EXITOSO
-    fmt.Println("Pago aprobado! AuthCode:", params.AuthorizationCode)
-    fmt.Printf("Monto cobrado: $%.2f\n", amount)
-
-    // Últimos 4 dígitos de la tarjeta (para mostrar al usuario)
+    fmt.Println("Aprobado!", params.AuthorizationCode)
     fmt.Println("Tarjeta: ****", params.CardLastFour())
-} else {
-    // PAGO RECHAZADO
-    fmt.Println("Rechazado. Código:", params.IsoCode, "Mensaje:", params.ResponseMessage)
 }
 ```
 
----
-
-## DataVault (Guardar tarjetas para pagos futuros)
-
-DataVault permite tokenizar la tarjeta del cliente para que en pagos futuros no tenga que re-ingresar los datos completos. El flujo es:
-
-1. **Primer pago**: Guardar la tarjeta con `SaveToDataVault: true`
-2. **Callback**: Recibir y almacenar el `DataVaultToken`
-3. **Pagos futuros**: Pagar con el token guardado (Azul solo pide el CVV)
-
-### Paso 1: Pago con guardado de tarjeta
+### DataVault vía HPP
 
 ```go
+// Guardar tarjeta durante el pago
 result := client.BuildPaymentForm(azul.PaymentRequest{
     OrderNumber:     "ORD-1234",
     Amount:          1500.00,
-    ITBIS:           0,
-    SaveToDataVault: true, // Guardar tarjeta para futuros pagos
+    SaveToDataVault: true,
 })
-```
 
-Esto agrega `SaveToDataVault=1` al formulario. El hash NO se ve afectado (este campo no entra en el cálculo del HMAC).
-
-### Paso 2: Recibir el token en el callback
-
-Cuando el pago es aprobado con `SaveToDataVault`, Azul devuelve campos adicionales:
-
-```go
-if client.IsApproved(params) {
-    // Guardar estos datos en tu base de datos
-    token      := params.DataVaultToken      // "FE1525FD-A59B-476A-9EFA-387D510689AB"
-    expiration := params.DataVaultExpiration  // "202612" (formato YYYYMM)
-    brand      := params.DataVaultBrand      // "VISA", "MASTERCARD", etc.
-    lastFour   := params.CardLastFour()      // "8810"
-
-    // Guardar en tu DB asociado al usuario
-    saveCardForUser(userID, token, expiration, brand, lastFour)
-}
-```
-
-### Paso 3: Pagar con token guardado
-
-En pagos futuros, envía el token y Azul solo pedirá el CVV:
-
-```go
+// Pagar con token guardado (Azul solo pide CVV)
 result := client.BuildPaymentForm(azul.PaymentRequest{
     OrderNumber:    "ORD-5678",
     Amount:         2000.00,
-    ITBIS:          0,
-    DataVaultToken: "FE1525FD-A59B-476A-9EFA-387D510689AB", // token guardado
+    DataVaultToken: "FE1525FD-A59B-476A-9EFA-387D510689AB",
 })
-
-// El formulario incluye:
-// - DatavaultToken: el token
-// - SaveToDataVault: "0" (automático, la tarjeta ya está guardada)
-// - AuthHash: calculado con el orden de campos de token payment
 ```
 
-El usuario verá la página de Azul pero solo tendrá que ingresar el CVV en vez de todos los datos de la tarjeta.
-
-### Notas sobre DataVault
-
-- Si `DataVaultToken` está seteado, `SaveToDataVault` se fuerza a `"0"` automáticamente
-- El token es alfanumérico de 30-40 caracteres (ej: `"FE1525FD-A59B-476A-9EFA-387D510689AB"`)
-- La expiración viene en formato YYYYMM
-- El hash para pagos con token usa un orden de campos diferente al pago estándar (incluye el token entre `ApprovedUrl` y `DeclinedUrl`)
-
----
-
-## Últimos 4 dígitos de la tarjeta
-
-Azul devuelve el número de tarjeta enmascarado en el callback (ej: `"554941...8810"`). La librería provee un método seguro para extraer solo los últimos 4 dígitos:
-
-```go
-params.CardLastFour() // → "8810"
-```
-
-Casos:
-
-```go
-// Tarjeta enmascarada por Azul
-CallbackParams{CardNumber: "554941...8810"}.CardLastFour()    // → "8810"
-CallbackParams{CardNumber: "414746*****0117"}.CardLastFour()  // → "0117"
-
-// Casos límite
-CallbackParams{CardNumber: "1234"}.CardLastFour()             // → "1234"
-CallbackParams{CardNumber: "123"}.CardLastFour()              // → "" (muy corto)
-CallbackParams{CardNumber: ""}.CardLastFour()                 // → ""
-```
-
----
-
-## Anulaciones (VOID)
-
-Para anular una transacción, necesitas el `AzulOrderID` del pago original:
+### Anulación (VOID) vía HPP
 
 ```go
 result := client.BuildVoidForm(azul.VoidRequest{
-    OrderNumber: "ORD-1234",        // tu referencia original
-    AzulOrderID: "abc-def-123",     // de params.AzulOrderID del pago original
-    Amount:      2500.00,           // monto original
-    ITBIS:       0,                 // ITBIS original
+    OrderNumber: "ORD-1234",
+    AzulOrderID: "abc-def-123",
+    Amount:      1500.00,
+    ITBIS:       0,
 })
-
-// El frontend hace POST igual que con el pago
-// Azul redirige a VoidCallbackURL con el resultado
-// Validar igual con ValidateCallback + IsApproved
 ```
-
-> **Nota:** Azul permite VOIDs solo dentro de un plazo limitado después del pago (generalmente el mismo día). Tu app debe verificar la ventana de tiempo antes de intentar el VOID.
 
 ---
 
-## Funciones utilitarias
+## API Client (Webservices server-to-server)
 
-### `azul.GenerateOrderNumber(prefix)`
-
-Genera un número de orden único basado en timestamp:
+### Configuración
 
 ```go
-azul.GenerateOrderNumber("ORD")  // → "ORD-1709234567890"
-azul.GenerateOrderNumber("LPJ")  // → "LPJ-1709234567890"
-azul.GenerateOrderNumber("INV")  // → "INV-1709234567890"
+client, err := azul.NewAPIClient(azul.APIConfig{
+    Auth1:       os.Getenv("AZUL_AUTH1"),
+    Auth2:       os.Getenv("AZUL_AUTH2"),
+    CertFile:    "/path/to/azul-cert.pem",  // Certificado TLS emitido por Azul
+    KeyFile:     "/path/to/azul-key.pem",
+    Store:       os.Getenv("AZUL_STORE"),   // MID asignado por Azul
+    Environment: "test",                     // "test" o "production"
+    // Opcionales:
+    Channel:              "EC",              // default "EC"
+    PosInputMode:         "E-Commerce",      // default "E-Commerce"
+    CurrencyPosCode:      "$",               // default "$" (DOP)
+    CustomerServicePhone: "809-555-1234",
+    ECommerceURL:         "https://mitienda.com",
+    AltMerchantName:      "MI TIENDA SRL",
+})
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
-### `azul.FormatAmount(amount)`
+### Sale (Venta directa)
 
-Convierte un monto monetario al formato string que espera Azul (sin separador decimal, mínimo 3 chars):
+```go
+resp, err := client.Sale(ctx, azul.SaleRequest{
+    CardNumber:    "4111111111111111",
+    Expiration:    "202812",
+    CVC:           "123",
+    Amount:        1500.00,
+    ITBIS:         270.00,
+    OrderNumber:   "ORD-001",
+    CustomOrderId: "ABC123",
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+if resp.IsApproved() {
+    fmt.Println("Aprobado! AzulOrderId:", resp.AzulOrderId)
+} else if resp.HasError() {
+    fmt.Println("Error:", resp.ErrorDescription)
+} else {
+    fmt.Println("Rechazado:", resp.ResponseMessage, "IsoCode:", resp.IsoCode)
+}
+```
+
+### Sale con DataVault (guardar tarjeta)
+
+```go
+resp, err := client.Sale(ctx, azul.SaleRequest{
+    CardNumber:      "4111111111111111",
+    Expiration:      "202812",
+    CVC:             "123",
+    Amount:          1500.00,
+    ITBIS:           0,
+    OrderNumber:     "ORD-002",
+    SaveToDataVault: true,
+})
+if resp.IsApproved() {
+    token := resp.DataVaultToken // Guardar para futuros cobros
+}
+```
+
+### TokenSale (Cobro con token)
+
+```go
+resp, err := client.TokenSale(ctx, azul.TokenSaleRequest{
+    DataVaultToken: "6EF85D01-B07C-4E67-99F7-4E13A449DCDD",
+    Amount:         500.00,
+    ITBIS:          0,
+    OrderNumber:    "ORD-003",
+    CustomOrderId:  "RECURRENTE-001",
+})
+```
+
+### Hold (Pre-autorización)
+
+```go
+resp, err := client.Hold(ctx, azul.HoldRequest{
+    CardNumber:  "4111111111111111",
+    Expiration:  "202812",
+    CVC:         "123",
+    Amount:      2000.00,
+    ITBIS:       0,
+    OrderNumber: "ORD-HOLD-1",
+})
+```
+
+### Void (Anulación)
+
+```go
+resp, err := client.Void(ctx, azul.APIVoidRequest{
+    AzulOrderId: "18527",
+})
+```
+
+### Refund (Devolución)
+
+```go
+resp, err := client.Refund(ctx, azul.RefundRequest{
+    CardNumber:  "4111111111111111",
+    Expiration:  "202812",
+    CVC:         "123",
+    Amount:      300.00,
+    ITBIS:       0,
+    OrderNumber: "ORD-REFUND-1",
+})
+```
+
+### VerifyPayment
+
+```go
+resp, err := client.VerifyPayment(ctx, azul.VerifyRequest{
+    CustomOrderId: "ABC123",
+})
+if resp.IsFound() && resp.IsApproved() {
+    fmt.Println("Transacción encontrada y aprobada")
+}
+```
+
+### CreateToken (sin cobro)
+
+```go
+resp, err := client.CreateToken(ctx, azul.CreateTokenRequest{
+    CardNumber: "4111111111111111",
+    Expiration: "202512",
+    CVC:        "123",
+})
+if resp.IsApproved() {
+    token := resp.DataVaultToken
+    brand := resp.Brand
+}
+```
+
+### DeleteToken
+
+```go
+resp, err := client.DeleteToken(ctx, azul.DeleteTokenRequest{
+    DataVaultToken: "6EF85D01-B07C-4E67-99F7-4E13A449DCDD",
+})
+```
+
+---
+
+## APIResponse
+
+Todos los métodos del APIClient retornan `*APIResponse`:
+
+```go
+type APIResponse struct {
+    AuthorizationCode   string
+    AzulOrderId         string
+    CustomOrderId       string
+    DateTime            string
+    ErrorDescription    string
+    IsoCode             string
+    LotNumber           string
+    RRN                 string
+    ResponseCode        string
+    ResponseMessage     string
+    Ticket              string
+    CardNumber          string
+    DataVaultToken      string
+    DataVaultBrand      string
+    DataVaultExpiration string
+    // + campos específicos de VerifyPayment y DataVault
+}
+```
+
+Helpers:
+- `resp.IsApproved()` → `IsoCode == "00"`
+- `resp.WasProcessed()` → `ResponseCode == "ISO8583"` (el banco respondió)
+- `resp.HasError()` → `ResponseCode == "Error"` (no se procesó)
+- `resp.IsFound()` → para VerifyPayment
+- `resp.CardLastFour()` → últimos 4 dígitos
+
+---
+
+## URLs de Azul
+
+### HPP (Página de Pago)
+
+| Entorno | URL principal | URL alternativa |
+|---------|--------------|----------------|
+| `test` | `pruebas.azul.com.do/PaymentPage/` | — |
+| `production` | `pagos.azul.com.do/PaymentPage/Default.aspx` | `contpagos.azul.com.do/PaymentPage/Default.aspx` |
+
+### API (Webservices JSON)
+
+| Entorno | URL principal | URL alternativa |
+|---------|--------------|----------------|
+| `test` | `pruebas.azul.com.do/WebServices/JSON/Default.aspx` | — |
+| `production` | `pagos.azul.com.do/WebServices/JSON/Default.aspx` | `contpagos.azul.com.do/WebServices/JSON/Default.aspx` |
+
+El APIClient hace fallback automático al URL secundario si el primario falla (solo en producción).
+
+---
+
+## Formato de montos
 
 ```go
 azul.FormatAmount(0)       // → "000"
 azul.FormatAmount(0.50)    // → "050"
 azul.FormatAmount(15.00)   // → "1500"
 azul.FormatAmount(1500.00) // → "150000"
-azul.FormatAmount(1234.56) // → "123456"
-```
 
-### `azul.ParseAmount(s)`
-
-Inverso de FormatAmount — convierte string de Azul a monto monetario:
-
-```go
-azul.ParseAmount("000")    // → 0.00
-azul.ParseAmount("050")    // → 0.50
-azul.ParseAmount("1500")   // → 15.00
 azul.ParseAmount("150000") // → 1500.00
-azul.ParseAmount("123456") // → 1234.56
 ```
 
 ---
 
-## Monedas
-
-La librería soporta múltiples monedas. La moneda se puede configurar a nivel global (Config) o por transacción:
-
-### Moneda por defecto en Config
-
-```go
-// Comercio que solo opera en pesos
-client := azul.NewClient(azul.Config{
-    CurrencyCode: "$",   // DOP — este es el default si no lo pasas
-    // ...
-})
-
-// Comercio que solo opera en dólares
-client := azul.NewClient(azul.Config{
-    CurrencyCode: "USD",
-    // ...
-})
-```
-
-### Override por transacción
-
-```go
-// Cliente configurado en pesos, pero esta orden es en dólares
-result := client.BuildPaymentForm(azul.PaymentRequest{
-    OrderNumber:  "ORD-USD-1",
-    Amount:       50.00,
-    CurrencyCode: "USD", // override solo para esta transacción
-})
-```
-
-| CurrencyCode | Moneda |
-|---|---|
-| `"$"` | Peso Dominicano (DOP) — default |
-| `"USD"` | Dólar Estadounidense |
-
----
-
-## URLs de Azul
-
-La librería selecciona automáticamente según `Environment`:
-
-| Entorno | URL principal | URL alternativa |
-|---------|--------------|----------------|
-| `test` | `https://pruebas.azul.com.do/PaymentPage/` | — |
-| `production` | `https://pagos.azul.com.do/PaymentPage/Default.aspx` | `https://contpagos.azul.com.do/PaymentPage/Default.aspx` |
-
-La URL alternativa es un fallback que Azul proporciona por si el servidor principal está caído. Tu frontend debería intentar con `AltActionURL` si el POST a `ActionURL` falla (solo en producción).
-
----
-
-## Sobre el HMAC AuthHash
-
-### Request (tu app → Azul)
-
-Los campos se concatenan en este orden exacto + la AuthKey, y se firma con HMAC-SHA512:
-
-**Pago estándar:**
-```
-MerchantId + MerchantName + MerchantType + CurrencyCode + OrderNumber +
-Amount + ITBIS + ApprovedUrl + DeclinedUrl + CancelUrl +
-UseCustomField1 + CustomField1Label + CustomField1Value +
-UseCustomField2 + CustomField2Label + CustomField2Value + AuthKey
-```
-
-**Pago con token DataVault:**
-```
-MerchantId + MerchantName + MerchantType + CurrencyCode + OrderNumber +
-Amount + ITBIS + ApprovedUrl + DatavaultToken + DeclinedUrl + CancelUrl +
-UseCustomField1 + CustomField1Label + CustomField1Value +
-UseCustomField2 + CustomField2Label + CustomField2Value + AuthKey
-```
-
-El hash se envía en el campo `AuthHash` del formulario en **lowercase hex**.
-
-### Response (Azul → tu app)
-
-Azul devuelve un `AuthHash` en el callback. Esta librería lo valida intentando **10 combinaciones**:
-
-- **4 órdenes de campos estándar** (con/sin DateTime, con/sin ErrorDescription)
-- **1 orden DataVault** (ISOCode + ResponseMessage + ErrorDescription + CardNumber + DataVaultToken + DataVaultExpiration + DataVaultBrand)
-- **2 encodings por cada orden** (UTF-8 y UTF-16LE)
-
-Esto es necesario porque la implementación de Azul varía entre versiones y la referencia PHP usa `mb_convert_encoding($str, 'UTF-16LE', 'ASCII')`.
-
-Si Azul no devuelve AuthHash (string vacío), `ValidateCallback` retorna `true` — se confía en el ResponseCode.
-
----
-
-## Campos del callback de Azul
-
-| Campo | Tipo | Descripción |
-|-------|------|-------------|
-| `OrderNumber` | `string` | Tu número de orden original |
-| `Amount` | `string` | Monto en formato Azul (usa `ParseAmount` para convertir) |
-| `ITBIS` | `string` | Impuesto en formato Azul (usa `ParseAmount` para convertir) |
-| `AuthorizationCode` | `string` | Código de autorización del banco |
-| `DateTime` | `string` | Fecha/hora de la transacción |
-| `ResponseCode` | `string` | `"ISO8583"` si el banco respondió |
-| `IsoCode` | `string` | `"00"` = aprobado, otros = rechazado |
-| `ResponseMessage` | `string` | Mensaje legible (ej: `"APROBADA"`) |
-| `ErrorDescription` | `string` | Descripción del error (vacío si aprobado) |
-| `RRN` | `string` | Reference Retrieval Number |
-| `AuthHash` | `string` | HMAC para validación |
-| `CardNumber` | `string` | Número de tarjeta enmascarado (ej: `"554941...8810"`). Usa `CardLastFour()` |
-| `DataVaultToken` | `string` | Token de tarjeta tokenizada (si SaveToDataVault=1) |
-| `DataVaultExpiration` | `string` | Expiración del token en formato YYYYMM |
-| `DataVaultBrand` | `string` | Marca de la tarjeta (VISA, MASTERCARD, etc.) |
-| `AzulOrderID` | `string` | ID de transacción de Azul (necesario para VOIDs) |
-
-### Códigos ISO 8583 comunes
+## Códigos ISO 8583 comunes
 
 | `IsoCode` | Significado |
 |-----------|-------------|
@@ -484,70 +371,7 @@ Si Azul no devuelve AuthHash (string vacío), `ValidateCallback` retorna `true` 
 | `51` | Fondos insuficientes |
 | `54` | Tarjeta expirada |
 | `61` | Excede límite de retiro |
-| `65` | Excede límite de frecuencia |
 | `91` | Emisor no disponible |
-
----
-
-## Modo dual (test + producción)
-
-Puedes crear dos clientes para manejar pruebas y producción simultáneamente:
-
-```go
-prodClient := azul.NewClient(azul.Config{
-    MerchantID:  os.Getenv("AZUL_MERCHANT_ID"),
-    AuthKey:     os.Getenv("AZUL_AUTH_KEY"),
-    Environment: "production",
-    // ...
-})
-
-testClient := azul.NewClient(azul.Config{
-    MerchantID:  os.Getenv("AZUL_TEST_MERCHANT_ID"),
-    AuthKey:     os.Getenv("AZUL_TEST_AUTH_KEY"),
-    Environment: "test",
-    // ...
-})
-
-// Seleccionar cliente según el usuario
-func azulForUser(email string) *azul.Client {
-    if isTestEmail(email) {
-        return testClient
-    }
-    return prodClient
-}
-```
-
----
-
-## Manejo del ITBIS
-
-Azul espera el campo ITBIS por separado, pero hay dos estrategias:
-
-### Opción A: ITBIS incluido en Amount (recomendado)
-
-```go
-result := client.BuildPaymentForm(azul.PaymentRequest{
-    OrderNumber: "ORD-1",
-    Amount:      1180.00, // RD$1,180.00 (incluye ITBIS)
-    ITBIS:       0,       // enviar 0 porque ya está incluido
-})
-```
-
-### Opción B: ITBIS separado
-
-```go
-subtotal := 1000.00 // RD$1,000.00
-itbis := 180.00     // 18%
-total := subtotal + itbis
-
-result := client.BuildPaymentForm(azul.PaymentRequest{
-    OrderNumber: "ORD-1",
-    Amount:      total, // RD$1,180.00
-    ITBIS:       itbis, // RD$180.00
-})
-```
-
-Ambas funcionan. La opción A es más simple si ya calculas el total con ITBIS incluido en tu backend.
 
 ---
 
@@ -557,43 +381,86 @@ Ambas funcionan. La opción A es más simple si ya calculas el total con ITBIS i
 go test ./... -v
 ```
 
+54 tests: 26 HPP + 28 API.
+
 ---
 
 ## Estructura del proyecto
 
 ```
 azul-go/
-├── azul.go        # Client, Config, BuildPaymentForm, BuildVoidForm,
-│                  # ValidateCallback, IsApproved, FormatAmount, ParseAmount,
-│                  # CardLastFour, DataVault support
-├── hmac.go        # HMAC-SHA512 signing, verification, UTF-16LE encoding,
-│                  # token payment hash order
-├── azul_test.go   # Tests
+├── common.go          # FormatAmount, ParseAmount, GenerateOrderNumber
+├── hpp.go             # HPPConfig, HPPClient, BuildPaymentForm, BuildVoidForm,
+│                      # ValidateCallback, IsApproved, CallbackParams
+├── hmac.go            # HMAC-SHA512 signing/verification (solo HPP)
+├── api.go             # APIConfig, APIClient, NewAPIClient, APIResponse, doRequest
+├── api_payment.go     # Sale, TokenSale, Hold, Refund
+├── api_void.go        # Void
+├── api_verify.go      # VerifyPayment
+├── api_datavault.go   # CreateToken, DeleteToken
+├── hpp_test.go        # 26 tests HPP
+├── api_test.go        # 28 tests API
 ├── go.mod
 └── README.md
 ```
 
 ---
 
+## Breaking changes en v0.1.0
+
+Si vienes de v0.0.2, estos son los cambios necesarios:
+
+```go
+// Antes (v0.0.2)
+client := azul.NewClient(azul.Config{...})
+
+// Después (v0.1.0)
+client := azul.NewHPPClient(azul.HPPConfig{...})
+```
+
+| v0.0.2 | v0.1.0 |
+|--------|--------|
+| `azul.Config` | `azul.HPPConfig` |
+| `azul.NewClient()` | `azul.NewHPPClient()` |
+| `*azul.Client` | `*azul.HPPClient` |
+| `azul.TestURL` | `azul.HPPTestURL` (alias `TestURL` aún funciona) |
+| `azul.ProductionURL` | `azul.HPPProductionURL` (alias `ProductionURL` aún funciona) |
+| `azul.ProductionAltURL` | `azul.HPPProductionAltURL` (alias `ProductionAltURL` aún funciona) |
+
+Las constantes `TestURL`, `ProductionURL`, `ProductionAltURL` siguen disponibles como aliases deprecated.
+
+---
+
 ## Changelog
+
+### v0.1.0
+
+- **BREAKING**: `Config` → `HPPConfig`, `Client` → `HPPClient`, `NewClient()` → `NewHPPClient()`
+- **APIClient**: Nuevo cliente server-to-server para Azul Webservices JSON API
+  - `Sale`: Cobro con tarjeta completa
+  - `TokenSale`: Cobro con token DataVault
+  - `Hold`: Pre-autorización
+  - `Refund`: Devolución
+  - `Void`: Anulación vía ProcessVoid
+  - `VerifyPayment`: Verificar estado de transacción
+  - `CreateToken`: Tokenizar tarjeta sin cobro
+  - `DeleteToken`: Eliminar token del DataVault
+- **TLS mutual auth**: Soporte de certificados cliente emitidos por Azul
+- **Fallback automático**: Si el URL primario falla, intenta el secundario (producción)
+- **Context support**: Todos los métodos API aceptan `context.Context`
+- Utilidades compartidas extraídas a `common.go`
+- 28 tests nuevos para API (54 tests totales)
 
 ### v0.0.2
 
-- **DataVault**: Soporte para guardar tarjetas (`SaveToDataVault`) y pagar con tokens (`DataVaultToken`)
-- **CardLastFour()**: Método para extraer los últimos 4 dígitos del número de tarjeta enmascarado
-- **CardNumber**: Nuevo campo en `CallbackParams` para el número de tarjeta enmascarado
-- **DataVaultExpiration**: Nuevo campo en `CallbackParams` para la expiración del token
-- **Token payment hash**: Hash HMAC con orden de campos correcto para pagos con DataVault token
-- **DataVault callback validation**: `ValidateCallback` ahora soporta el formato de hash de respuestas DataVault
+- DataVault: Soporte para guardar tarjetas y pagar con tokens vía HPP
+- CardLastFour(): Últimos 4 dígitos del número enmascarado
+- Token payment hash con orden de campos correcto
+- DataVault callback validation
 
 ### v0.0.1
 
-- Release inicial
-- Generación de formulario de pago con HMAC-SHA512
-- Validación de callbacks con 8 combinaciones de campos/encoding
-- Soporte de VOID
-- Formato de montos
-- Soporte multi-moneda
+- Release inicial: HPP payment form, VOID, callback validation, HMAC-SHA512
 
 ---
 

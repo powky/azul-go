@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-func testClient() *Client {
-	return NewClient(Config{
+func testHPPClient() *HPPClient {
+	return NewHPPClient(HPPConfig{
 		MerchantID:   "39038540035",
 		AuthKey:      "test-secret-key-12345",
 		MerchantName: "Test Store",
@@ -20,11 +20,11 @@ func testClient() *Client {
 }
 
 // ============================================================================
-// Config defaults
+// HPPConfig defaults
 // ============================================================================
 
-func TestConfigDefaults(t *testing.T) {
-	c := NewClient(Config{
+func TestHPPConfigDefaults(t *testing.T) {
+	c := NewHPPClient(HPPConfig{
 		MerchantID:  "123",
 		AuthKey:     "key",
 		Environment: "test",
@@ -45,7 +45,7 @@ func TestConfigDefaults(t *testing.T) {
 // ============================================================================
 
 func TestBuildPaymentForm(t *testing.T) {
-	client := testClient()
+	client := testHPPClient()
 
 	result := client.BuildPaymentForm(PaymentRequest{
 		OrderNumber: "ORD-123",
@@ -101,7 +101,7 @@ func TestBuildPaymentForm(t *testing.T) {
 }
 
 func TestBuildPaymentFormProduction(t *testing.T) {
-	client := NewClient(Config{
+	client := NewHPPClient(HPPConfig{
 		MerchantID:  "123",
 		AuthKey:     "key",
 		Environment: "production",
@@ -124,7 +124,7 @@ func TestBuildPaymentFormProduction(t *testing.T) {
 }
 
 func TestBuildPaymentFormCurrencyOverride(t *testing.T) {
-	client := testClient() // default CurrencyCode = "$"
+	client := testHPPClient() // default CurrencyCode = "$"
 
 	result := client.BuildPaymentForm(PaymentRequest{
 		OrderNumber:  "ORD-USD-1",
@@ -138,7 +138,7 @@ func TestBuildPaymentFormCurrencyOverride(t *testing.T) {
 }
 
 func TestBuildPaymentFormConfigCurrency(t *testing.T) {
-	client := NewClient(Config{
+	client := NewHPPClient(HPPConfig{
 		MerchantID:   "123",
 		AuthKey:      "key",
 		Environment:  "test",
@@ -163,7 +163,7 @@ func TestBuildPaymentFormConfigCurrency(t *testing.T) {
 // ============================================================================
 
 func TestBuildVoidForm(t *testing.T) {
-	client := testClient()
+	client := testHPPClient()
 
 	result := client.BuildVoidForm(VoidRequest{
 		OrderNumber: "ORD-123",
@@ -189,7 +189,7 @@ func TestBuildVoidForm(t *testing.T) {
 }
 
 func TestBuildVoidFormWithCallback(t *testing.T) {
-	client := NewClient(Config{
+	client := NewHPPClient(HPPConfig{
 		MerchantID:      "123",
 		AuthKey:         "key",
 		Environment:     "test",
@@ -215,7 +215,7 @@ func TestBuildVoidFormWithCallback(t *testing.T) {
 }
 
 func TestBuildVoidFormCurrencyOverride(t *testing.T) {
-	client := testClient()
+	client := testHPPClient()
 
 	result := client.BuildVoidForm(VoidRequest{
 		OrderNumber:  "ORD-1",
@@ -234,7 +234,7 @@ func TestBuildVoidFormCurrencyOverride(t *testing.T) {
 // ============================================================================
 
 func TestValidateCallbackNoHash(t *testing.T) {
-	client := testClient()
+	client := testHPPClient()
 
 	// No hash provided → should return true (trust by ResponseCode)
 	ok := client.ValidateCallback(CallbackParams{
@@ -247,7 +247,7 @@ func TestValidateCallbackNoHash(t *testing.T) {
 }
 
 func TestValidateCallbackWithValidHash(t *testing.T) {
-	client := testClient()
+	client := testHPPClient()
 
 	// Build a payment to get valid fields
 	result := client.BuildPaymentForm(PaymentRequest{
@@ -290,7 +290,7 @@ func TestValidateCallbackWithValidHash(t *testing.T) {
 }
 
 func TestValidateCallbackInvalidHash(t *testing.T) {
-	client := testClient()
+	client := testHPPClient()
 
 	ok := client.ValidateCallback(CallbackParams{
 		OrderNumber: "ORD-123",
@@ -304,7 +304,7 @@ func TestValidateCallbackInvalidHash(t *testing.T) {
 }
 
 func TestIsApproved(t *testing.T) {
-	client := testClient()
+	client := testHPPClient()
 
 	approved := CallbackParams{IsoCode: "00"}
 	declined := CallbackParams{IsoCode: "51"}
@@ -425,7 +425,7 @@ func TestCardLastFour(t *testing.T) {
 // ============================================================================
 
 func TestBuildPaymentFormWithSaveToDataVault(t *testing.T) {
-	client := testClient()
+	client := testHPPClient()
 
 	result := client.BuildPaymentForm(PaymentRequest{
 		OrderNumber:     "ORD-DV-1",
@@ -459,7 +459,7 @@ func TestBuildPaymentFormWithSaveToDataVault(t *testing.T) {
 }
 
 func TestBuildPaymentFormWithDataVaultToken(t *testing.T) {
-	client := testClient()
+	client := testHPPClient()
 	token := "FE1525FD-A59B-476A-9EFA-387D510689AB"
 
 	result := client.BuildPaymentForm(PaymentRequest{
@@ -496,7 +496,7 @@ func TestBuildPaymentFormWithDataVaultToken(t *testing.T) {
 }
 
 func TestBuildPaymentFormTokenOverridesSaveToDataVault(t *testing.T) {
-	client := testClient()
+	client := testHPPClient()
 
 	// Even if SaveToDataVault is true, DataVaultToken should force it to 0
 	result := client.BuildPaymentForm(PaymentRequest{
@@ -516,7 +516,7 @@ func TestBuildPaymentFormTokenOverridesSaveToDataVault(t *testing.T) {
 // ============================================================================
 
 func TestValidateCallbackDataVaultHash(t *testing.T) {
-	client := testClient()
+	client := testHPPClient()
 
 	// Simulate a DataVault callback with the DataVault hash format
 	params := CallbackParams{
@@ -543,7 +543,7 @@ func TestValidateCallbackDataVaultHash(t *testing.T) {
 }
 
 func TestValidateCallbackStandardStillWorks(t *testing.T) {
-	client := testClient()
+	client := testHPPClient()
 
 	// Standard callback (same as existing test) should still validate
 	result := client.BuildPaymentForm(PaymentRequest{
