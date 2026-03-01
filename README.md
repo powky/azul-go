@@ -1,6 +1,6 @@
 # azul-go
 
-> **v0.2.0** — Nuevos métodos: Post, TokenHold, SearchPayments. Ver [Changelog](#changelog).
+> **v0.3.0** — Nuevo: CreateSubscription (pagos recurrentes). Ver [Changelog](#changelog).
 
 Cliente Go para **Azul** — la pasarela de pago de República Dominicana.
 
@@ -29,6 +29,7 @@ Dos modos de integración:
 - **CreateToken**: Tokeniza una tarjeta sin hacer cobro
 - **DeleteToken**: Elimina un token del DataVault
 - **SearchPayments**: Búsqueda de transacciones por rango de fechas
+- **CreateSubscription**: Suscripciones recurrentes (cobros automáticos diarios, semanales o mensuales)
 - Fallback automático al URL secundario en producción
 - TLS mutual authentication con certificados de Azul
 
@@ -336,6 +337,117 @@ for _, tx := range resp.Transactions {
 > **Nota:** `SearchPayments` retorna `*SearchResponse` (con campo `Transactions []SearchTransaction`)
 > en vez de `*APIResponse`, ya que la estructura de respuesta de Azul es diferente.
 
+### CreateSubscription (Pagos recurrentes)
+
+Crea suscripciones de cobro automático vía `recurringsubscriptioncreate`.
+
+> **Diferencias importantes con otros métodos:**
+> - El monto es decimal: `50.00` = cincuenta pesos (NO centavos como Sale/Hold)
+> - La moneda es `"DOP"` (NO `"$"` como otros métodos)
+> - La expiración del campo es `CardExpiration` (NO `Expiration`)
+> - Azul puede requerir credenciales Auth1/Auth2 distintas para suscripciones en producción
+
+#### Suscripción diaria
+
+```go
+resp, err := client.CreateSubscription(ctx, azul.SubscriptionRequest{
+    CardNumber:     "5426111111111979",
+    CardExpiration: "202512",           // Formato YYYYMM
+    CVC:            "123",
+    Amount:         50.00,              // Decimal (NO centavos)
+    ITBIS:          0,
+    Frequency:      "Daily",
+    EveryXDays:     "2",                // Cada 2 días
+    Month:          "7",
+    StartDate:      "2025-7-27",        // Formato YYYY-M-D
+    MaxRepeats:     "12",               // 12 cobros (vacío = ilimitado)
+    CustomerName:       "Juan Pérez",
+    CustomerContract:   "WEB1234",
+    CustomerIdentType:  "Cedula",
+    CustomerIdentNum:   "00100204566",
+})
+if resp.WasCreated() {
+    fmt.Println("Suscripción creada, próximo cobro:", resp.NextScheduledDate)
+}
+```
+
+#### Suscripción semanal
+
+```go
+resp, err := client.CreateSubscription(ctx, azul.SubscriptionRequest{
+    CardNumber:     "5426111111111979",
+    CardExpiration: "202512",
+    CVC:            "123",
+    Amount:         100.00,
+    ITBIS:          0,
+    Frequency:      "Weekly",
+    EveryXWeeks:    "1",              // Cada semana
+    Weekdays:       "3",              // Miércoles (1=Lunes ... 7=Domingo)
+    Month:          "7",
+    StartDate:      "2025-7-27",
+    CustomerName:       "María López",
+    CustomerContract:   "WEB5678",
+    CustomerIdentType:  "Cedula",
+    CustomerIdentNum:   "00100204566",
+})
+```
+
+#### Suscripción mensual
+
+```go
+resp, err := client.CreateSubscription(ctx, azul.SubscriptionRequest{
+    CardNumber:     "5426111111111979",
+    CardExpiration: "202512",
+    CVC:            "123",
+    Amount:         500.00,
+    ITBIS:          90.00,
+    Frequency:       "MonthlyByDay",
+    EveryXMonths:    "1",             // Cada mes
+    DayOfMonth:      "15",            // Día 15 del mes
+    Month:           "7",
+    StartDate:       "2025-7-15",
+    CustomerName:        "Carlos García",
+    CustomerContract:    "PREMIUM-001",
+    CustomerIdentType:   "Cedula",
+    CustomerIdentNum:    "00100204566",
+    CustomerEmail:       "carlos@example.com",
+    NotifyTransactions:  true,
+    NotifyExpired:       true,
+    SaveToDataVault:     true,
+    Description:         "Plan Premium mensual",
+})
+```
+
+#### Con tarjetas de respaldo
+
+```go
+resp, err := client.CreateSubscription(ctx, azul.SubscriptionRequest{
+    CardNumber:     "5426111111111979",
+    CardExpiration: "202512",
+    CVC:            "123",
+    Amount:         200.00,
+    ITBIS:          0,
+    Frequency:      "MonthlyByDay",
+    EveryXMonths:   "1",
+    DayOfMonth:     "1",
+    Month:          "1",
+    StartDate:      "2025-1-1",
+    CustomerName:       "Ana Martínez",
+    CustomerContract:   "RESPALDO-001",
+    CustomerIdentType:  "Cedula",
+    CustomerIdentNum:   "00100204566",
+    // Azul intenta Card2 si la primaria falla, luego Card3
+    Card2Number:     "4111111111111111",
+    Card2Expiration: "2512",            // Formato MMYY
+    Card3Number:     "4012888888881881",
+    Card3Expiration: "2612",
+})
+```
+
+> **Nota:** `CreateSubscription` retorna `*SubscriptionResponse` (con `CustomSubscriptionId`,
+> `NextScheduledDate`, `ResponseCode`). Usa `resp.WasCreated()` para verificar éxito
+> (`ResponseCode == "CREATED"`).
+
 ---
 
 ## APIResponse
@@ -427,7 +539,7 @@ azul.ParseAmount("150000") // → 1500.00
 go test ./... -v
 ```
 
-63 tests: 26 HPP + 37 API.
+70 tests: 26 HPP + 44 API.
 
 ---
 
@@ -446,8 +558,9 @@ azul-go/
 ├── api_verify.go      # VerifyPayment
 ├── api_datavault.go   # CreateToken, DeleteToken
 ├── api_search.go      # SearchPayments
+├── api_subscription.go # CreateSubscription (pagos recurrentes)
 ├── hpp_test.go        # 26 tests HPP
-├── api_test.go        # 37 tests API
+├── api_test.go        # 44 tests API
 ├── go.mod
 └── README.md
 ```
@@ -480,6 +593,15 @@ Las constantes `TestURL`, `ProductionURL`, `ProductionAltURL` siguen disponibles
 ---
 
 ## Changelog
+
+### v0.3.0
+
+- `CreateSubscription`: Suscripciones de pagos recurrentes vía `recurringsubscriptioncreate`
+  - Soporte para frecuencia diaria, semanal y mensual
+  - Tarjetas de respaldo (Card2, Card3) con fallback automático por Azul
+  - Notificaciones por email (transacciones, expiración, próxima expiración)
+  - Tokenización (SaveToDataVault) durante creación de suscripción
+- 7 tests nuevos (70 tests totales)
 
 ### v0.2.0
 
