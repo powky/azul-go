@@ -1,6 +1,6 @@
 # azul-go
 
-> **v0.1.0** — Breaking changes desde v0.0.2. Ver [Changelog](#changelog).
+> **v0.2.0** — Nuevos métodos: Post, TokenHold, SearchPayments. Ver [Changelog](#changelog).
 
 Cliente Go para **Azul** — la pasarela de pago de República Dominicana.
 
@@ -21,11 +21,14 @@ Dos modos de integración:
 - **Sale**: Cobro directo con tarjeta completa
 - **TokenSale**: Cobro con token DataVault (sin datos de tarjeta)
 - **Hold**: Pre-autorización (reserva el monto sin capturar)
+- **TokenHold**: Pre-autorización con token DataVault
+- **Post**: Captura de una pre-autorización (Hold → cobro efectivo)
 - **Refund**: Devolución de fondos al tarjetahabiente
 - **Void**: Anulación de transacción (dentro de 20 min)
 - **VerifyPayment**: Verifica el estado de una transacción anterior
 - **CreateToken**: Tokeniza una tarjeta sin hacer cobro
 - **DeleteToken**: Elimina un token del DataVault
+- **SearchPayments**: Búsqueda de transacciones por rango de fechas
 - Fallback automático al URL secundario en producción
 - TLS mutual authentication con certificados de Azul
 
@@ -236,6 +239,28 @@ resp, err := client.Hold(ctx, azul.HoldRequest{
 })
 ```
 
+### TokenHold (Pre-autorización con token)
+
+```go
+resp, err := client.TokenHold(ctx, azul.TokenHoldRequest{
+    DataVaultToken: "6EF85D01-B07C-4E67-99F7-4E13A449DCDD",
+    Amount:         2000.00,
+    ITBIS:          0,
+    OrderNumber:    "ORD-HOLD-TOKEN-1",
+})
+```
+
+### Post (Captura de Hold)
+
+```go
+// Captura total o parcial de un Hold aprobado
+resp, err := client.Post(ctx, azul.PostRequest{
+    AzulOrderId: holdResp.AzulOrderId, // ID del Hold original
+    Amount:      2000.00,              // Igual o menor al monto del Hold
+    ITBIS:       0,
+})
+```
+
 ### Void (Anulación)
 
 ```go
@@ -248,12 +273,14 @@ resp, err := client.Void(ctx, azul.APIVoidRequest{
 
 ```go
 resp, err := client.Refund(ctx, azul.RefundRequest{
-    CardNumber:  "4111111111111111",
-    Expiration:  "202812",
-    CVC:         "123",
-    Amount:      300.00,
-    ITBIS:       0,
-    OrderNumber: "ORD-REFUND-1",
+    CardNumber:   "4111111111111111",
+    Expiration:   "202812",
+    CVC:          "123",
+    Amount:       300.00,
+    ITBIS:        0,
+    OriginalDate: "20250115",       // Fecha de la transacción original (YYYYMMDD)
+    AzulOrderId:  "11350",          // ID de la transacción original
+    OrderNumber:  "ORD-REFUND-1",
 })
 ```
 
@@ -289,6 +316,25 @@ resp, err := client.DeleteToken(ctx, azul.DeleteTokenRequest{
     DataVaultToken: "6EF85D01-B07C-4E67-99F7-4E13A449DCDD",
 })
 ```
+
+### SearchPayments (Búsqueda de transacciones)
+
+```go
+resp, err := client.SearchPayments(ctx, azul.SearchRequest{
+    DateFrom: "20250101", // YYYYMMDD
+    DateTo:   "20250131",
+})
+if err != nil {
+    log.Fatal(err)
+}
+for _, tx := range resp.Transactions {
+    fmt.Printf("Orden: %s, Monto: %s, Tipo: %s, ISO: %s\n",
+        tx.AzulOrderId, tx.Amount, tx.TransactionType, tx.IsoCode)
+}
+```
+
+> **Nota:** `SearchPayments` retorna `*SearchResponse` (con campo `Transactions []SearchTransaction`)
+> en vez de `*APIResponse`, ya que la estructura de respuesta de Azul es diferente.
 
 ---
 
@@ -381,7 +427,7 @@ azul.ParseAmount("150000") // → 1500.00
 go test ./... -v
 ```
 
-54 tests: 26 HPP + 28 API.
+63 tests: 26 HPP + 37 API.
 
 ---
 
@@ -394,12 +440,14 @@ azul-go/
 │                      # ValidateCallback, IsApproved, CallbackParams
 ├── hmac.go            # HMAC-SHA512 signing/verification (solo HPP)
 ├── api.go             # APIConfig, APIClient, NewAPIClient, APIResponse, doRequest
-├── api_payment.go     # Sale, TokenSale, Hold, Refund
+├── api_payment.go     # Sale, TokenSale, Hold, TokenHold, Refund
+├── api_post.go        # Post (captura de Hold)
 ├── api_void.go        # Void
 ├── api_verify.go      # VerifyPayment
 ├── api_datavault.go   # CreateToken, DeleteToken
+├── api_search.go      # SearchPayments
 ├── hpp_test.go        # 26 tests HPP
-├── api_test.go        # 28 tests API
+├── api_test.go        # 37 tests API
 ├── go.mod
 └── README.md
 ```
@@ -432,6 +480,13 @@ Las constantes `TestURL`, `ProductionURL`, `ProductionAltURL` siguen disponibles
 ---
 
 ## Changelog
+
+### v0.2.0
+
+- `Post`: Captura de pre-autorizaciones (Hold → cobro efectivo) vía ProcessPost
+- `TokenHold`: Pre-autorización con token DataVault (sin datos de tarjeta)
+- `SearchPayments`: Búsqueda de transacciones por rango de fechas
+- 9 tests nuevos (63 tests totales)
 
 ### v0.1.0
 

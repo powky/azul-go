@@ -278,7 +278,8 @@ func (c *APIClient) doRequest(ctx context.Context, queryMethod string, payload i
 	return resp, err
 }
 
-func (c *APIClient) post(ctx context.Context, url string, body []byte) (*APIResponse, error) {
+// postRaw sends a POST request and returns the raw response body bytes.
+func (c *APIClient) postRaw(ctx context.Context, url string, body []byte) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("azul: failed to create request: %w", err)
@@ -299,12 +300,47 @@ func (c *APIClient) post(ctx context.Context, url string, body []byte) (*APIResp
 		return nil, fmt.Errorf("azul: failed to read response: %w", err)
 	}
 
+	return respBody, nil
+}
+
+func (c *APIClient) post(ctx context.Context, url string, body []byte) (*APIResponse, error) {
+	respBody, err := c.postRaw(ctx, url, body)
+	if err != nil {
+		return nil, err
+	}
+
 	var result APIResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("azul: failed to decode response: %w", err)
 	}
 
 	return &result, nil
+}
+
+// doRequestRaw sends a JSON POST to Azul's API with fallback and returns
+// the raw response bytes. Used by methods that need custom response types
+// (e.g. SearchPayments which returns a Transactions array).
+func (c *APIClient) doRequestRaw(ctx context.Context, queryMethod string, payload interface{}) ([]byte, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("azul: failed to marshal request: %w", err)
+	}
+
+	url := c.primaryURL
+	if queryMethod != "" {
+		url += "?" + queryMethod
+	}
+
+	resp, err := c.postRaw(ctx, url, body)
+	if err != nil && c.altURL != "" {
+		altURL := c.altURL
+		if queryMethod != "" {
+			altURL += "?" + queryMethod
+		}
+		resp, err = c.postRaw(ctx, altURL, body)
+	}
+
+	return resp, err
 }
 
 // ============================================================================

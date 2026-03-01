@@ -622,12 +622,14 @@ func TestRefund(t *testing.T) {
 	client := newTestAPIClient(t, server)
 
 	_, err := client.Refund(context.Background(), RefundRequest{
-		CardNumber:  "4111111111111111",
-		Expiration:  "202512",
-		CVC:         "123",
-		Amount:      300.00,
-		ITBIS:       0,
-		OrderNumber: "ORD-REFUND-1",
+		CardNumber:   "4111111111111111",
+		Expiration:   "202512",
+		CVC:          "123",
+		Amount:       300.00,
+		ITBIS:        0,
+		OriginalDate: "20250115",
+		AzulOrderId:  "11350",
+		OrderNumber:  "ORD-REFUND-1",
 	})
 	if err != nil {
 		t.Fatalf("Refund() error: %v", err)
@@ -638,6 +640,18 @@ func TestRefund(t *testing.T) {
 	}
 	if capturedBody["Amount"] != "30000" {
 		t.Errorf("unexpected Amount: %v", capturedBody["Amount"])
+	}
+	// OriginalDate is required for refunds
+	if capturedBody["OriginalDate"] != "20250115" {
+		t.Errorf("expected OriginalDate=20250115, got %v", capturedBody["OriginalDate"])
+	}
+	// AzulOrderId is required for refunds
+	if capturedBody["AzulOrderId"] != "11350" {
+		t.Errorf("expected AzulOrderId=11350, got %v", capturedBody["AzulOrderId"])
+	}
+	// AcquirerRefData must be empty (Nulo) for refunds
+	if capturedBody["AcquirerRefData"] != "" {
+		t.Errorf("expected AcquirerRefData empty for refund, got %v", capturedBody["AcquirerRefData"])
 	}
 	// Refund should never save to DataVault
 	if capturedBody["SaveToDataVault"] != "0" {
@@ -878,6 +892,391 @@ func TestDeleteToken(t *testing.T) {
 	}
 	if capturedBody["DataVaultToken"] != "176D4B51-E562-4584-95E5-10E7ABC36BBC" {
 		t.Errorf("unexpected DataVaultToken: %v", capturedBody["DataVaultToken"])
+	}
+}
+
+// ============================================================================
+// TokenHold
+// ============================================================================
+
+func TestTokenHold(t *testing.T) {
+	var capturedBody map[string]interface{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody = parseRequestBody(t, r)
+
+		// TokenHold uses ProcessPayment (no query string)
+		if r.URL.RawQuery != "" {
+			t.Errorf("TokenHold should not have query string, got %q", r.URL.RawQuery)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"ResponseCode": "ISO8583",
+			"IsoCode":      "00",
+			"AzulOrderId":  "77777",
+		})
+	}))
+	defer server.Close()
+
+	client := newTestAPIClient(t, server)
+
+	resp, err := client.TokenHold(context.Background(), TokenHoldRequest{
+		DataVaultToken: "6EF85D01-B07C-4E67-99F7-4E13A449DCDD",
+		Amount:         2000.00,
+		ITBIS:          360.00,
+		OrderNumber:    "ORD-HOLD-TOKEN-1",
+	})
+	if err != nil {
+		t.Fatalf("TokenHold() error: %v", err)
+	}
+
+	if !resp.IsApproved() {
+		t.Error("expected approved response")
+	}
+
+	// Verify TrxType is Hold
+	if capturedBody["TrxType"] != "Hold" {
+		t.Errorf("expected TrxType=Hold, got %v", capturedBody["TrxType"])
+	}
+
+	// Card data should be empty for token holds
+	if capturedBody["CardNumber"] != "" {
+		t.Errorf("expected empty CardNumber for token hold, got %v", capturedBody["CardNumber"])
+	}
+	if capturedBody["Expiration"] != "" {
+		t.Errorf("expected empty Expiration for token hold, got %v", capturedBody["Expiration"])
+	}
+
+	// Token should be set
+	if capturedBody["DataVaultToken"] != "6EF85D01-B07C-4E67-99F7-4E13A449DCDD" {
+		t.Errorf("unexpected DataVaultToken: %v", capturedBody["DataVaultToken"])
+	}
+
+	// SaveToDataVault should be 0
+	if capturedBody["SaveToDataVault"] != "0" {
+		t.Errorf("expected SaveToDataVault=0, got %v", capturedBody["SaveToDataVault"])
+	}
+
+	// Amount should be formatted correctly
+	if capturedBody["Amount"] != "200000" {
+		t.Errorf("unexpected Amount: %v", capturedBody["Amount"])
+	}
+	if capturedBody["Itbis"] != "36000" {
+		t.Errorf("unexpected Itbis: %v", capturedBody["Itbis"])
+	}
+}
+
+// ============================================================================
+// Post (Capture)
+// ============================================================================
+
+func TestPost(t *testing.T) {
+	var capturedBody map[string]interface{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody = parseRequestBody(t, r)
+
+		// Verify query string
+		if r.URL.RawQuery != "ProcessPost" {
+			t.Errorf("expected query ProcessPost, got %q", r.URL.RawQuery)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"AuthorizationCode": "OK7891",
+			"AzulOrderId":       "55555",
+			"ResponseCode":      "ISO8583",
+			"IsoCode":           "00",
+			"ResponseMessage":   "APROBADA",
+		})
+	}))
+	defer server.Close()
+
+	client := newTestAPIClient(t, server)
+
+	resp, err := client.Post(context.Background(), PostRequest{
+		AzulOrderId: "55555",
+		Amount:      2000.00,
+		ITBIS:       360.00,
+	})
+	if err != nil {
+		t.Fatalf("Post() error: %v", err)
+	}
+
+	if !resp.IsApproved() {
+		t.Error("expected approved response")
+	}
+	if resp.AzulOrderId != "55555" {
+		t.Errorf("unexpected AzulOrderId: %q", resp.AzulOrderId)
+	}
+
+	// Verify request body
+	if capturedBody["Channel"] != "EC" {
+		t.Errorf("unexpected Channel: %v", capturedBody["Channel"])
+	}
+	if capturedBody["Store"] != "39099999999" {
+		t.Errorf("unexpected Store: %v", capturedBody["Store"])
+	}
+	if capturedBody["AzulOrderId"] != "55555" {
+		t.Errorf("unexpected AzulOrderId: %v", capturedBody["AzulOrderId"])
+	}
+	if capturedBody["Amount"] != "200000" {
+		t.Errorf("unexpected Amount: %v", capturedBody["Amount"])
+	}
+	if capturedBody["Itbis"] != "36000" {
+		t.Errorf("unexpected Itbis: %v", capturedBody["Itbis"])
+	}
+}
+
+func TestPostPartialCapture(t *testing.T) {
+	var capturedBody map[string]interface{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody = parseRequestBody(t, r)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"ResponseCode": "ISO8583",
+			"IsoCode":      "00",
+			"AzulOrderId":  "55555",
+		})
+	}))
+	defer server.Close()
+
+	client := newTestAPIClient(t, server)
+
+	// Capture less than the hold amount
+	resp, err := client.Post(context.Background(), PostRequest{
+		AzulOrderId: "55555",
+		Amount:      1000.00, // Less than original 2000.00 hold
+		ITBIS:       0,
+	})
+	if err != nil {
+		t.Fatalf("Post() error: %v", err)
+	}
+
+	if !resp.IsApproved() {
+		t.Error("expected approved response for partial capture")
+	}
+	if capturedBody["Amount"] != "100000" {
+		t.Errorf("unexpected Amount for partial capture: %v", capturedBody["Amount"])
+	}
+}
+
+func TestPostInvalidHold(t *testing.T) {
+	server := httptest.NewServer(azulHandler(t, "POST", "ProcessPost",
+		`{"AuthorizationCode":"","AzulOrderId":"","ErrorDescription":"TRANSACTION_NOT_FOUND","IsoCode":"","ResponseCode":"Error","ResponseMessage":""}`))
+	defer server.Close()
+
+	client := newTestAPIClient(t, server)
+
+	resp, err := client.Post(context.Background(), PostRequest{
+		AzulOrderId: "99999",
+		Amount:      1000.00,
+		ITBIS:       0,
+	})
+	if err != nil {
+		t.Fatalf("Post() error: %v", err)
+	}
+
+	if !resp.HasError() {
+		t.Error("expected error response for invalid hold")
+	}
+	if !strings.Contains(resp.ErrorDescription, "TRANSACTION_NOT_FOUND") {
+		t.Errorf("unexpected ErrorDescription: %q", resp.ErrorDescription)
+	}
+}
+
+// ============================================================================
+// SearchPayments
+// ============================================================================
+
+func TestSearchPayments(t *testing.T) {
+	var capturedBody map[string]interface{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedBody = parseRequestBody(t, r)
+
+		// Verify query string
+		if r.URL.RawQuery != "SearchPayments" {
+			t.Errorf("expected query SearchPayments, got %q", r.URL.RawQuery)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{
+			"ErrorDescription": "",
+			"ResponseCode": "",
+			"Transactions": [
+				{
+					"AzulOrderId": "11350",
+					"Amount": "150000",
+					"AuthorizationCode": "OK463C",
+					"CardNumber": "411111******1111",
+					"CurrencyPosCode": "$",
+					"CustomOrderId": "ABC123",
+					"DateTime": "20250115120821",
+					"ErrorDescription": "",
+					"Found": "true",
+					"IsoCode": "00",
+					"Itbis": "27000",
+					"LotNumber": "29",
+					"OrderNumber": "ORD-001",
+					"RRN": "000012003029",
+					"ResponseCode": "ISO8583",
+					"Ticket": "2809",
+					"TransactionType": "Sale"
+				},
+				{
+					"AzulOrderId": "11351",
+					"Amount": "50000",
+					"AuthorizationCode": "OK789A",
+					"CardNumber": "555555******4444",
+					"CurrencyPosCode": "$",
+					"CustomOrderId": "DEF456",
+					"DateTime": "20250116143000",
+					"ErrorDescription": "",
+					"Found": "true",
+					"IsoCode": "00",
+					"Itbis": "000",
+					"LotNumber": "30",
+					"OrderNumber": "ORD-002",
+					"RRN": "000012003030",
+					"ResponseCode": "ISO8583",
+					"Ticket": "2810",
+					"TransactionType": "Hold"
+				}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	client := newTestAPIClient(t, server)
+
+	resp, err := client.SearchPayments(context.Background(), SearchRequest{
+		DateFrom: "20250101",
+		DateTo:   "20250131",
+	})
+	if err != nil {
+		t.Fatalf("SearchPayments() error: %v", err)
+	}
+
+	// Verify request body
+	if capturedBody["Channel"] != "EC" {
+		t.Errorf("unexpected Channel: %v", capturedBody["Channel"])
+	}
+	if capturedBody["Store"] != "39099999999" {
+		t.Errorf("unexpected Store: %v", capturedBody["Store"])
+	}
+	if capturedBody["DateFrom"] != "20250101" {
+		t.Errorf("unexpected DateFrom: %v", capturedBody["DateFrom"])
+	}
+	if capturedBody["DateTo"] != "20250131" {
+		t.Errorf("unexpected DateTo: %v", capturedBody["DateTo"])
+	}
+
+	// Verify response
+	if resp.HasError() {
+		t.Errorf("unexpected error: %q", resp.ErrorDescription)
+	}
+	if len(resp.Transactions) != 2 {
+		t.Fatalf("expected 2 transactions, got %d", len(resp.Transactions))
+	}
+
+	// First transaction
+	tx1 := resp.Transactions[0]
+	if tx1.AzulOrderId != "11350" {
+		t.Errorf("tx1 unexpected AzulOrderId: %q", tx1.AzulOrderId)
+	}
+	if tx1.Amount != "150000" {
+		t.Errorf("tx1 unexpected Amount: %q", tx1.Amount)
+	}
+	if tx1.IsoCode != "00" {
+		t.Errorf("tx1 unexpected IsoCode: %q", tx1.IsoCode)
+	}
+	if tx1.TransactionType != "Sale" {
+		t.Errorf("tx1 unexpected TransactionType: %q", tx1.TransactionType)
+	}
+	if tx1.CardNumber != "411111******1111" {
+		t.Errorf("tx1 unexpected CardNumber: %q", tx1.CardNumber)
+	}
+
+	// Second transaction
+	tx2 := resp.Transactions[1]
+	if tx2.AzulOrderId != "11351" {
+		t.Errorf("tx2 unexpected AzulOrderId: %q", tx2.AzulOrderId)
+	}
+	if tx2.TransactionType != "Hold" {
+		t.Errorf("tx2 unexpected TransactionType: %q", tx2.TransactionType)
+	}
+}
+
+func TestSearchPaymentsEmpty(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery != "SearchPayments" {
+			t.Errorf("expected query SearchPayments, got %q", r.URL.RawQuery)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{
+			"ErrorDescription": "",
+			"ResponseCode": "",
+			"Transactions": []
+		}`))
+	}))
+	defer server.Close()
+
+	client := newTestAPIClient(t, server)
+
+	resp, err := client.SearchPayments(context.Background(), SearchRequest{
+		DateFrom: "20250201",
+		DateTo:   "20250228",
+	})
+	if err != nil {
+		t.Fatalf("SearchPayments() error: %v", err)
+	}
+
+	if len(resp.Transactions) != 0 {
+		t.Errorf("expected 0 transactions, got %d", len(resp.Transactions))
+	}
+}
+
+func TestSearchPaymentsError(t *testing.T) {
+	server := httptest.NewServer(azulHandler(t, "POST", "SearchPayments",
+		`{"ErrorDescription":"INVALID_DATE_FORMAT","ResponseCode":"Error","Transactions":null}`))
+	defer server.Close()
+
+	client := newTestAPIClient(t, server)
+
+	resp, err := client.SearchPayments(context.Background(), SearchRequest{
+		DateFrom: "invalid",
+		DateTo:   "invalid",
+	})
+	if err != nil {
+		t.Fatalf("SearchPayments() error: %v", err)
+	}
+
+	if !resp.HasError() {
+		t.Error("expected error response")
+	}
+	if !strings.Contains(resp.ErrorDescription, "INVALID_DATE_FORMAT") {
+		t.Errorf("unexpected ErrorDescription: %q", resp.ErrorDescription)
+	}
+}
+
+func TestSearchResponseHasError(t *testing.T) {
+	tests := []struct {
+		code string
+		want bool
+	}{
+		{"Error", true},
+		{"", false},
+		{"ISO8583", false},
+	}
+	for _, tt := range tests {
+		r := &SearchResponse{ResponseCode: tt.code}
+		if got := r.HasError(); got != tt.want {
+			t.Errorf("SearchResponse.HasError() with ResponseCode=%q: got %v, want %v", tt.code, got, tt.want)
+		}
 	}
 }
 
