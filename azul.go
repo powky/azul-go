@@ -121,6 +121,14 @@ type PaymentRequest struct {
 	// CurrencyCode overrides Config.CurrencyCode for this request.
 	// "$" = DOP, "USD" = US Dollar. Leave empty to use the Config default.
 	CurrencyCode string
+
+	// SaveToDataVault instructs Azul to tokenize the card for future payments.
+	// When true, Azul returns a DataVaultToken in the callback upon approval.
+	SaveToDataVault bool
+
+	// DataVaultToken is a previously generated token for paying without full card entry.
+	// When set, Azul only asks for the CVV (security code) instead of full card details.
+	DataVaultToken string
 }
 
 // PaymentResult contains everything needed to POST the payment form to Azul.
@@ -177,13 +185,34 @@ func (c *Client) BuildPaymentForm(req PaymentRequest) PaymentResult {
 		"CustomField2Value": "",
 	}
 
-	hashUpper := signHPPRequest(c.config.AuthKey, fields)
+	// Token-based payment: include DatavaultToken in hash fields
+	if req.DataVaultToken != "" {
+		fields["DatavaultToken"] = req.DataVaultToken
+	}
+
+	// Sign with the appropriate field order
+	var hashUpper string
+	if req.DataVaultToken != "" {
+		hashUpper = signHPPTokenRequest(c.config.AuthKey, fields)
+	} else {
+		hashUpper = signHPPRequest(c.config.AuthKey, fields)
+	}
 	fields["AuthHash"] = strings.ToLower(hashUpper)
 
 	// Extra POST fields (NOT included in hash, but required by Azul)
 	fields["TerminalId"] = c.config.TerminalID
 	fields["PosInputMode"] = c.config.MerchantType
 	fields["CustomOrderId"] = req.OrderNumber
+
+	// DataVault: save card for future use
+	if req.SaveToDataVault {
+		fields["SaveToDataVault"] = "1"
+	}
+
+	// Token payment: ensure SaveToDataVault is 0 (card already saved)
+	if req.DataVaultToken != "" {
+		fields["SaveToDataVault"] = "0"
+	}
 
 	return PaymentResult{
 		ActionURL:    c.paymentPageURL(),
@@ -310,9 +339,23 @@ type CallbackParams struct {
 	ErrorDescription  string
 	RRN               string
 	AuthHash          string
-	DataVaultToken    string
-	DataVaultBrand    string
-	AzulOrderID       string
+	CardNumber          string // Masked card number returned by Azul (e.g. "554941...8810"). Use CardLastFour() to safely extract the last 4 digits.
+	DataVaultToken      string
+	DataVaultExpiration string // Token expiration in YYYYMM format.
+	DataVaultBrand      string
+	AzulOrderID         string
+}
+
+// CardLastFour returns the last 4 digits of the card number from the Azul callback.
+//
+// Azul returns the card number in masked form (e.g. "554941...8810").
+// This method extracts only the trailing 4 digits for safe display/storage.
+// Returns empty string if CardNumber has fewer than 4 characters.
+func (p CallbackParams) CardLastFour() string {
+	if len(p.CardNumber) < 4 {
+		return ""
+	}
+	return p.CardNumber[len(p.CardNumber)-4:]
 }
 
 // ValidateCallback verifies the HMAC AuthHash returned by Azul to ensure the
@@ -326,15 +369,19 @@ type CallbackParams struct {
 // configurations don't return AuthHash).
 func (c *Client) ValidateCallback(params CallbackParams) bool {
 	m := map[string]string{
-		"OrderNumber":       params.OrderNumber,
-		"Amount":            params.Amount,
-		"AuthorizationCode": params.AuthorizationCode,
-		"DateTime":          params.DateTime,
-		"ResponseCode":      params.ResponseCode,
-		"ISOCode":           params.IsoCode,
-		"ResponseMessage":   params.ResponseMessage,
-		"ErrorDescription":  params.ErrorDescription,
-		"RRN":               params.RRN,
+		"OrderNumber":         params.OrderNumber,
+		"Amount":              params.Amount,
+		"AuthorizationCode":   params.AuthorizationCode,
+		"DateTime":            params.DateTime,
+		"ResponseCode":        params.ResponseCode,
+		"ISOCode":             params.IsoCode,
+		"ResponseMessage":     params.ResponseMessage,
+		"ErrorDescription":    params.ErrorDescription,
+		"RRN":                 params.RRN,
+		"CardNumber":          params.CardNumber,
+		"DataVaultToken":      params.DataVaultToken,
+		"DataVaultExpiration": params.DataVaultExpiration,
+		"DataVaultBrand":      params.DataVaultBrand,
 	}
 	return verifyHPPReturn(c.config.AuthKey, m, params.AuthHash)
 }

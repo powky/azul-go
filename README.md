@@ -1,5 +1,7 @@
 # azul-go
 
+> **v0.0.2**
+
 Cliente Go para **Azul Payment Page (HPP)** — la pasarela de pago estándar de Azul en República Dominicana.
 
 ## Qué hace esta librería
@@ -10,6 +12,8 @@ Cliente Go para **Azul Payment Page (HPP)** — la pasarela de pago estándar de
 - Convierte montos entre formato legible (1500.00) y formato Azul ("150000")
 - Soporta múltiples monedas ("$" para DOP, "USD" para dólares)
 - Genera números de orden únicos
+- **DataVault**: Guarda tarjetas tokenizadas para pagos futuros sin re-ingresar datos
+- **Últimos 4 dígitos**: Extrae de forma segura los últimos 4 dígitos del número de tarjeta del callback
 
 ## Qué NO hace
 
@@ -165,18 +169,22 @@ Cuando Azul redirige de vuelta, tu frontend captura los query params y los enví
 ```go
 // Parsear los parámetros del callback (de query string o JSON body)
 params := azul.CallbackParams{
-    OrderNumber:       r.FormValue("OrderNumber"),
-    Amount:            r.FormValue("Amount"),
-    ITBIS:             r.FormValue("ITBIS"),
-    AuthorizationCode: r.FormValue("AuthorizationCode"),
-    DateTime:          r.FormValue("DateTime"),
-    ResponseCode:      r.FormValue("ResponseCode"),
-    IsoCode:           r.FormValue("ISOCode"),
-    ResponseMessage:   r.FormValue("ResponseMessage"),
-    ErrorDescription:  r.FormValue("ErrorDescription"),
-    RRN:               r.FormValue("RRN"),
-    AuthHash:          r.FormValue("AuthHash"),
-    AzulOrderID:       r.FormValue("AzulOrderId"),
+    OrderNumber:         r.FormValue("OrderNumber"),
+    Amount:              r.FormValue("Amount"),
+    ITBIS:               r.FormValue("ITBIS"),
+    AuthorizationCode:   r.FormValue("AuthorizationCode"),
+    DateTime:            r.FormValue("DateTime"),
+    ResponseCode:        r.FormValue("ResponseCode"),
+    IsoCode:             r.FormValue("ISOCode"),
+    ResponseMessage:     r.FormValue("ResponseMessage"),
+    ErrorDescription:    r.FormValue("ErrorDescription"),
+    RRN:                 r.FormValue("RRN"),
+    AuthHash:            r.FormValue("AuthHash"),
+    CardNumber:          r.FormValue("CardNumber"),
+    DataVaultToken:      r.FormValue("DataVaultToken"),
+    DataVaultExpiration: r.FormValue("DataVaultExpiration"),
+    DataVaultBrand:      r.FormValue("DataVaultBrand"),
+    AzulOrderID:         r.FormValue("AzulOrderId"),
 }
 
 // Validar que el hash es legítimo (previene callbacks forjados)
@@ -192,15 +200,105 @@ amount := azul.ParseAmount(params.Amount) // "250000" → 2500.00
 // Verificar si el pago fue aprobado
 if client.IsApproved(params) {
     // PAGO EXITOSO
-    // - Actualizar orden como "pagada"
-    // - Descontar stock
-    // - Enviar email de confirmación
     fmt.Println("Pago aprobado! AuthCode:", params.AuthorizationCode)
     fmt.Printf("Monto cobrado: $%.2f\n", amount)
+
+    // Últimos 4 dígitos de la tarjeta (para mostrar al usuario)
+    fmt.Println("Tarjeta: ****", params.CardLastFour())
 } else {
     // PAGO RECHAZADO
     fmt.Println("Rechazado. Código:", params.IsoCode, "Mensaje:", params.ResponseMessage)
 }
+```
+
+---
+
+## DataVault (Guardar tarjetas para pagos futuros)
+
+DataVault permite tokenizar la tarjeta del cliente para que en pagos futuros no tenga que re-ingresar los datos completos. El flujo es:
+
+1. **Primer pago**: Guardar la tarjeta con `SaveToDataVault: true`
+2. **Callback**: Recibir y almacenar el `DataVaultToken`
+3. **Pagos futuros**: Pagar con el token guardado (Azul solo pide el CVV)
+
+### Paso 1: Pago con guardado de tarjeta
+
+```go
+result := client.BuildPaymentForm(azul.PaymentRequest{
+    OrderNumber:     "ORD-1234",
+    Amount:          1500.00,
+    ITBIS:           0,
+    SaveToDataVault: true, // Guardar tarjeta para futuros pagos
+})
+```
+
+Esto agrega `SaveToDataVault=1` al formulario. El hash NO se ve afectado (este campo no entra en el cálculo del HMAC).
+
+### Paso 2: Recibir el token en el callback
+
+Cuando el pago es aprobado con `SaveToDataVault`, Azul devuelve campos adicionales:
+
+```go
+if client.IsApproved(params) {
+    // Guardar estos datos en tu base de datos
+    token      := params.DataVaultToken      // "FE1525FD-A59B-476A-9EFA-387D510689AB"
+    expiration := params.DataVaultExpiration  // "202612" (formato YYYYMM)
+    brand      := params.DataVaultBrand      // "VISA", "MASTERCARD", etc.
+    lastFour   := params.CardLastFour()      // "8810"
+
+    // Guardar en tu DB asociado al usuario
+    saveCardForUser(userID, token, expiration, brand, lastFour)
+}
+```
+
+### Paso 3: Pagar con token guardado
+
+En pagos futuros, envía el token y Azul solo pedirá el CVV:
+
+```go
+result := client.BuildPaymentForm(azul.PaymentRequest{
+    OrderNumber:    "ORD-5678",
+    Amount:         2000.00,
+    ITBIS:          0,
+    DataVaultToken: "FE1525FD-A59B-476A-9EFA-387D510689AB", // token guardado
+})
+
+// El formulario incluye:
+// - DatavaultToken: el token
+// - SaveToDataVault: "0" (automático, la tarjeta ya está guardada)
+// - AuthHash: calculado con el orden de campos de token payment
+```
+
+El usuario verá la página de Azul pero solo tendrá que ingresar el CVV en vez de todos los datos de la tarjeta.
+
+### Notas sobre DataVault
+
+- Si `DataVaultToken` está seteado, `SaveToDataVault` se fuerza a `"0"` automáticamente
+- El token es alfanumérico de 30-40 caracteres (ej: `"FE1525FD-A59B-476A-9EFA-387D510689AB"`)
+- La expiración viene en formato YYYYMM
+- El hash para pagos con token usa un orden de campos diferente al pago estándar (incluye el token entre `ApprovedUrl` y `DeclinedUrl`)
+
+---
+
+## Últimos 4 dígitos de la tarjeta
+
+Azul devuelve el número de tarjeta enmascarado en el callback (ej: `"554941...8810"`). La librería provee un método seguro para extraer solo los últimos 4 dígitos:
+
+```go
+params.CardLastFour() // → "8810"
+```
+
+Casos:
+
+```go
+// Tarjeta enmascarada por Azul
+CallbackParams{CardNumber: "554941...8810"}.CardLastFour()    // → "8810"
+CallbackParams{CardNumber: "414746*****0117"}.CardLastFour()  // → "0117"
+
+// Casos límite
+CallbackParams{CardNumber: "1234"}.CardLastFour()             // → "1234"
+CallbackParams{CardNumber: "123"}.CardLastFour()              // → "" (muy corto)
+CallbackParams{CardNumber: ""}.CardLastFour()                 // → ""
 ```
 
 ---
@@ -321,9 +419,18 @@ La URL alternativa es un fallback que Azul proporciona por si el servidor princi
 
 Los campos se concatenan en este orden exacto + la AuthKey, y se firma con HMAC-SHA512:
 
+**Pago estándar:**
 ```
 MerchantId + MerchantName + MerchantType + CurrencyCode + OrderNumber +
 Amount + ITBIS + ApprovedUrl + DeclinedUrl + CancelUrl +
+UseCustomField1 + CustomField1Label + CustomField1Value +
+UseCustomField2 + CustomField2Label + CustomField2Value + AuthKey
+```
+
+**Pago con token DataVault:**
+```
+MerchantId + MerchantName + MerchantType + CurrencyCode + OrderNumber +
+Amount + ITBIS + ApprovedUrl + DatavaultToken + DeclinedUrl + CancelUrl +
 UseCustomField1 + CustomField1Label + CustomField1Value +
 UseCustomField2 + CustomField2Label + CustomField2Value + AuthKey
 ```
@@ -332,10 +439,11 @@ El hash se envía en el campo `AuthHash` del formulario en **lowercase hex**.
 
 ### Response (Azul → tu app)
 
-Azul devuelve un `AuthHash` en el callback. Esta librería lo valida intentando **8 combinaciones**:
+Azul devuelve un `AuthHash` en el callback. Esta librería lo valida intentando **10 combinaciones**:
 
-- **4 órdenes de campos** (con/sin DateTime, con/sin ErrorDescription)
-- **2 encodings** (UTF-8 y UTF-16LE)
+- **4 órdenes de campos estándar** (con/sin DateTime, con/sin ErrorDescription)
+- **1 orden DataVault** (ISOCode + ResponseMessage + ErrorDescription + CardNumber + DataVaultToken + DataVaultExpiration + DataVaultBrand)
+- **2 encodings por cada orden** (UTF-8 y UTF-16LE)
 
 Esto es necesario porque la implementación de Azul varía entre versiones y la referencia PHP usa `mb_convert_encoding($str, 'UTF-16LE', 'ASCII')`.
 
@@ -358,9 +466,11 @@ Si Azul no devuelve AuthHash (string vacío), `ValidateCallback` retorna `true` 
 | `ErrorDescription` | `string` | Descripción del error (vacío si aprobado) |
 | `RRN` | `string` | Reference Retrieval Number |
 | `AuthHash` | `string` | HMAC para validación |
+| `CardNumber` | `string` | Número de tarjeta enmascarado (ej: `"554941...8810"`). Usa `CardLastFour()` |
+| `DataVaultToken` | `string` | Token de tarjeta tokenizada (si SaveToDataVault=1) |
+| `DataVaultExpiration` | `string` | Expiración del token en formato YYYYMM |
+| `DataVaultBrand` | `string` | Marca de la tarjeta (VISA, MASTERCARD, etc.) |
 | `AzulOrderID` | `string` | ID de transacción de Azul (necesario para VOIDs) |
-| `DataVaultToken` | `string` | Token de tarjeta tokenizada (si aplica) |
-| `DataVaultBrand` | `string` | Marca de la tarjeta (Visa, Mastercard, etc.) |
 
 ### Códigos ISO 8583 comunes
 
@@ -454,12 +564,36 @@ go test ./... -v
 ```
 azul-go/
 ├── azul.go        # Client, Config, BuildPaymentForm, BuildVoidForm,
-│                  # ValidateCallback, IsApproved, FormatAmount, ParseAmount
-├── hmac.go        # HMAC-SHA512 signing, verification, UTF-16LE encoding
+│                  # ValidateCallback, IsApproved, FormatAmount, ParseAmount,
+│                  # CardLastFour, DataVault support
+├── hmac.go        # HMAC-SHA512 signing, verification, UTF-16LE encoding,
+│                  # token payment hash order
 ├── azul_test.go   # Tests
 ├── go.mod
 └── README.md
 ```
+
+---
+
+## Changelog
+
+### v0.0.2
+
+- **DataVault**: Soporte para guardar tarjetas (`SaveToDataVault`) y pagar con tokens (`DataVaultToken`)
+- **CardLastFour()**: Método para extraer los últimos 4 dígitos del número de tarjeta enmascarado
+- **CardNumber**: Nuevo campo en `CallbackParams` para el número de tarjeta enmascarado
+- **DataVaultExpiration**: Nuevo campo en `CallbackParams` para la expiración del token
+- **Token payment hash**: Hash HMAC con orden de campos correcto para pagos con DataVault token
+- **DataVault callback validation**: `ValidateCallback` ahora soporta el formato de hash de respuestas DataVault
+
+### v0.0.1
+
+- Release inicial
+- Generación de formulario de pago con HMAC-SHA512
+- Validación de callbacks con 8 combinaciones de campos/encoding
+- Soporte de VOID
+- Formato de montos
+- Soporte multi-moneda
 
 ---
 

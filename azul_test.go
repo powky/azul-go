@@ -396,6 +396,195 @@ func TestGenerateOrderNumber(t *testing.T) {
 }
 
 // ============================================================================
+// CardLastFour
+// ============================================================================
+
+func TestCardLastFour(t *testing.T) {
+	tests := []struct {
+		cardNumber string
+		expected   string
+	}{
+		{"554941...8810", "8810"},
+		{"414746*****0117", "0117"},
+		{"1234", "1234"},
+		{"123", ""},  // too short
+		{"", ""},     // empty
+		{"4111111111111111", "1111"},
+	}
+	for _, tt := range tests {
+		p := CallbackParams{CardNumber: tt.cardNumber}
+		got := p.CardLastFour()
+		if got != tt.expected {
+			t.Errorf("CardLastFour(%q) = %q, want %q", tt.cardNumber, got, tt.expected)
+		}
+	}
+}
+
+// ============================================================================
+// BuildPaymentForm with DataVault
+// ============================================================================
+
+func TestBuildPaymentFormWithSaveToDataVault(t *testing.T) {
+	client := testClient()
+
+	result := client.BuildPaymentForm(PaymentRequest{
+		OrderNumber:     "ORD-DV-1",
+		Amount:          1500.00,
+		ITBIS:           0,
+		SaveToDataVault: true,
+	})
+
+	if result.Fields["SaveToDataVault"] != "1" {
+		t.Errorf("expected SaveToDataVault=1, got %q", result.Fields["SaveToDataVault"])
+	}
+
+	// AuthHash should still be present and lowercase
+	hash := result.Fields["AuthHash"]
+	if hash == "" {
+		t.Fatal("AuthHash is empty")
+	}
+	if hash != strings.ToLower(hash) {
+		t.Errorf("AuthHash should be lowercase, got %q", hash)
+	}
+
+	// Hash should be identical to a payment without SaveToDataVault (not in hash)
+	resultNoVault := client.BuildPaymentForm(PaymentRequest{
+		OrderNumber: "ORD-DV-1",
+		Amount:      1500.00,
+		ITBIS:       0,
+	})
+	if result.Fields["AuthHash"] != resultNoVault.Fields["AuthHash"] {
+		t.Error("SaveToDataVault should NOT affect the AuthHash")
+	}
+}
+
+func TestBuildPaymentFormWithDataVaultToken(t *testing.T) {
+	client := testClient()
+	token := "FE1525FD-A59B-476A-9EFA-387D510689AB"
+
+	result := client.BuildPaymentForm(PaymentRequest{
+		OrderNumber:    "ORD-TOKEN-1",
+		Amount:         500.00,
+		ITBIS:          0,
+		DataVaultToken: token,
+	})
+
+	// Token should be in form fields
+	if result.Fields["DatavaultToken"] != token {
+		t.Errorf("expected DatavaultToken=%q, got %q", token, result.Fields["DatavaultToken"])
+	}
+
+	// SaveToDataVault should be forced to 0 for token payments
+	if result.Fields["SaveToDataVault"] != "0" {
+		t.Errorf("expected SaveToDataVault=0 for token payment, got %q", result.Fields["SaveToDataVault"])
+	}
+
+	// Hash should be different from a payment without token
+	resultNoToken := client.BuildPaymentForm(PaymentRequest{
+		OrderNumber: "ORD-TOKEN-1",
+		Amount:      500.00,
+		ITBIS:       0,
+	})
+	if result.Fields["AuthHash"] == resultNoToken.Fields["AuthHash"] {
+		t.Error("token payment should produce a different AuthHash than standard payment")
+	}
+
+	// AuthHash should be lowercase
+	if result.Fields["AuthHash"] != strings.ToLower(result.Fields["AuthHash"]) {
+		t.Errorf("AuthHash should be lowercase, got %q", result.Fields["AuthHash"])
+	}
+}
+
+func TestBuildPaymentFormTokenOverridesSaveToDataVault(t *testing.T) {
+	client := testClient()
+
+	// Even if SaveToDataVault is true, DataVaultToken should force it to 0
+	result := client.BuildPaymentForm(PaymentRequest{
+		OrderNumber:     "ORD-1",
+		Amount:          100.00,
+		SaveToDataVault: true,
+		DataVaultToken:  "SOME-TOKEN",
+	})
+
+	if result.Fields["SaveToDataVault"] != "0" {
+		t.Errorf("DataVaultToken should override SaveToDataVault to 0, got %q", result.Fields["SaveToDataVault"])
+	}
+}
+
+// ============================================================================
+// ValidateCallback with DataVault
+// ============================================================================
+
+func TestValidateCallbackDataVaultHash(t *testing.T) {
+	client := testClient()
+
+	// Simulate a DataVault callback with the DataVault hash format
+	params := CallbackParams{
+		IsoCode:             "00",
+		ResponseMessage:     "APROBADA",
+		ErrorDescription:    "",
+		CardNumber:          "554941...8810",
+		DataVaultToken:      "734016F2-00E5-4611-948C-8179FB2B8C74",
+		DataVaultExpiration: "201912",
+		DataVaultBrand:      "MASTERCARD",
+	}
+
+	// Compute DataVault hash: ISOCode + ResponseMessage + ErrorDescription + CardNumber + DataVaultToken + DataVaultExpiration + DataVaultBrand + AuthKey
+	var sb strings.Builder
+	for _, v := range []string{params.IsoCode, params.ResponseMessage, params.ErrorDescription, params.CardNumber, params.DataVaultToken, params.DataVaultExpiration, params.DataVaultBrand} {
+		sb.WriteString(v)
+	}
+	sb.WriteString(strings.TrimSpace(client.config.AuthKey))
+	params.AuthHash = strings.ToLower(hmacSHA512Upper(client.config.AuthKey, []byte(sb.String())))
+
+	if !client.ValidateCallback(params) {
+		t.Error("expected ValidateCallback to return true for valid DataVault hash")
+	}
+}
+
+func TestValidateCallbackStandardStillWorks(t *testing.T) {
+	client := testClient()
+
+	// Standard callback (same as existing test) should still validate
+	result := client.BuildPaymentForm(PaymentRequest{
+		OrderNumber: "ORD-STD",
+		Amount:      500.00,
+		ITBIS:       0,
+	})
+
+	params := CallbackParams{
+		OrderNumber:       result.Fields["OrderNumber"],
+		Amount:            result.Fields["Amount"],
+		AuthorizationCode: "123456",
+		DateTime:          "20250226120000",
+		ResponseCode:      "ISO8583",
+		IsoCode:           "00",
+		ResponseMessage:   "APROBADA",
+		ErrorDescription:  "",
+		RRN:               "999888777",
+	}
+
+	// Compute standard hash
+	m := map[string]string{
+		"OrderNumber": params.OrderNumber, "Amount": params.Amount,
+		"AuthorizationCode": params.AuthorizationCode, "DateTime": params.DateTime,
+		"ResponseCode": params.ResponseCode, "ISOCode": params.IsoCode,
+		"ResponseMessage": params.ResponseMessage, "ErrorDescription": params.ErrorDescription,
+		"RRN": params.RRN,
+	}
+	var sb strings.Builder
+	for _, k := range []string{"OrderNumber", "Amount", "AuthorizationCode", "DateTime", "ResponseCode", "ISOCode", "ResponseMessage", "ErrorDescription", "RRN"} {
+		sb.WriteString(m[k])
+	}
+	sb.WriteString(strings.TrimSpace(client.config.AuthKey))
+	params.AuthHash = strings.ToLower(hmacSHA512Upper(client.config.AuthKey, []byte(sb.String())))
+
+	if !client.ValidateCallback(params) {
+		t.Error("standard callback should still validate after DataVault changes")
+	}
+}
+
+// ============================================================================
 // HMAC internals
 // ============================================================================
 
@@ -438,5 +627,27 @@ func TestSignPaymentDeterministic(t *testing.T) {
 	h2 := signHPPRequest("secret", fields)
 	if h1 != h2 {
 		t.Error("signHPPRequest should be deterministic")
+	}
+}
+
+func TestSignTokenPaymentDeterministic(t *testing.T) {
+	fields := map[string]string{
+		"MerchantId": "123", "MerchantName": "Test", "MerchantType": "ECommerce",
+		"CurrencyCode": "$", "OrderNumber": "ORD-1", "Amount": "1000", "ITBIS": "000",
+		"ApprovedUrl": "https://ok", "DatavaultToken": "TOKEN-123", "DeclinedUrl": "https://fail", "CancelUrl": "https://cancel",
+		"UseCustomField1": "0", "CustomField1Label": "", "CustomField1Value": "",
+		"UseCustomField2": "0", "CustomField2Label": "", "CustomField2Value": "",
+	}
+
+	h1 := signHPPTokenRequest("secret", fields)
+	h2 := signHPPTokenRequest("secret", fields)
+	if h1 != h2 {
+		t.Error("signHPPTokenRequest should be deterministic")
+	}
+
+	// Token hash should differ from standard hash (different field order)
+	h3 := signHPPRequest("secret", fields)
+	if h1 == h3 {
+		t.Error("token payment hash should differ from standard payment hash")
 	}
 }

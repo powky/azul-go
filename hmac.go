@@ -17,6 +17,15 @@ var hashFieldOrder = []string{
 	"UseCustomField2", "CustomField2Label", "CustomField2Value",
 }
 
+// hashFieldOrderTokenPayment is the concatenation order when paying with a DataVault token.
+// Per Azul's specification, DatavaultToken is inserted between ApprovedUrl and DeclinedUrl.
+var hashFieldOrderTokenPayment = []string{
+	"MerchantId", "MerchantName", "MerchantType", "CurrencyCode", "OrderNumber",
+	"Amount", "ITBIS", "ApprovedUrl", "DatavaultToken", "DeclinedUrl", "CancelUrl",
+	"UseCustomField1", "CustomField1Label", "CustomField1Value",
+	"UseCustomField2", "CustomField2Label", "CustomField2Value",
+}
+
 // signHPPRequest signs the payment page request fields.
 //
 // Process:
@@ -26,6 +35,18 @@ var hashFieldOrder = []string{
 func signHPPRequest(secret string, fields map[string]string) string {
 	var sb strings.Builder
 	for _, k := range hashFieldOrder {
+		sb.WriteString(fields[k])
+	}
+	sb.WriteString(strings.TrimSpace(secret))
+
+	return hmacSHA512Upper(secret, []byte(sb.String()))
+}
+
+// signHPPTokenRequest signs a token-based payment request.
+// Uses hashFieldOrderTokenPayment which includes DatavaultToken in the hash.
+func signHPPTokenRequest(secret string, fields map[string]string) string {
+	var sb strings.Builder
+	for _, k := range hashFieldOrderTokenPayment {
 		sb.WriteString(fields[k])
 	}
 	sb.WriteString(strings.TrimSpace(secret))
@@ -50,12 +71,16 @@ func verifyHPPReturn(secret string, m map[string]string, providedHash string) bo
 	}
 	provided := strings.ToUpper(strings.TrimSpace(providedHash))
 
+	// Standard payment callback field orders
 	full := []string{"OrderNumber", "Amount", "AuthorizationCode", "DateTime", "ResponseCode", "ISOCode", "ResponseMessage", "ErrorDescription", "RRN"}
 	noDT := []string{"OrderNumber", "Amount", "AuthorizationCode", "ResponseCode", "ISOCode", "ResponseMessage", "ErrorDescription", "RRN"}
 	fullNoErr := []string{"OrderNumber", "Amount", "AuthorizationCode", "DateTime", "ResponseCode", "ISOCode", "ResponseMessage", "RRN"}
 	noDTNoErr := []string{"OrderNumber", "Amount", "AuthorizationCode", "ResponseCode", "ISOCode", "ResponseMessage", "RRN"}
 
-	for _, order := range [][]string{full, noDT, fullNoErr, noDTNoErr} {
+	// DataVault callback field order (used for token sale, token create, and token delete responses)
+	dataVault := []string{"ISOCode", "ResponseMessage", "ErrorDescription", "CardNumber", "DataVaultToken", "DataVaultExpiration", "DataVaultBrand"}
+
+	for _, order := range [][]string{full, noDT, fullNoErr, noDTNoErr, dataVault} {
 		var sb strings.Builder
 		for _, k := range order {
 			sb.WriteString(m[k])
